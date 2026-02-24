@@ -1,0 +1,576 @@
+"""
+Market data fetcher using yfinance.
+Fetches financial statements, valuation metrics, news and
+quarterly/annual financial trends for each position in the portfolio.
+"""
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal, Optional
+
+import pandas as pd
+import yfinance as yf
+from pydantic import BaseModel, Field, field_validator
+
+
+# Some ETFs listed on European exchanges need exchange suffix for yfinance
+TICKER_OVERRIDES = {
+    "EXX1": "EXX1.DE",
+    "EXH1": "EXH1.DE",
+}
+
+
+class ValuationMetrics(BaseModel):
+    pe_trailing: Optional[float] = None
+    pe_forward: Optional[float] = None
+    pb_ratio: Optional[float] = None
+    ev_to_ebitda: Optional[float] = None
+    price_to_sales: Optional[float] = None
+    debt_to_equity: Optional[float] = None
+    current_ratio: Optional[float] = None
+    return_on_equity: Optional[float] = None
+    return_on_assets: Optional[float] = None
+    profit_margin: Optional[float] = None
+    revenue_growth: Optional[float] = None
+    earnings_growth: Optional[float] = None
+    dividend_yield: Optional[float] = None
+    fifty_two_week_high: Optional[float] = None
+    fifty_two_week_low: Optional[float] = None
+    current_price: Optional[float] = None
+    market_cap: Optional[float] = None
+    beta: Optional[float] = None
+    free_cash_flow_ttm: Optional[float] = None
+    total_debt: Optional[float] = None
+    total_cash: Optional[float] = None
+    # ETF-specific (None for equities)
+    expense_ratio: Optional[float] = None
+    total_assets: Optional[float] = None       # AUM
+    ytd_return: Optional[float] = None
+    three_year_avg_return: Optional[float] = None
+    five_year_avg_return: Optional[float] = None
+
+    @field_validator("ytd_return", "three_year_avg_return", "five_year_avg_return", mode="before")
+    @classmethod
+    def validate_return(cls, v: object) -> Optional[float]:
+        """Reject corrupted ETF return data from yfinance (e.g. 3.5 meaning 350%)."""
+        if v is None:
+            return None
+        try:
+            v = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return None if abs(v) > 2.0 else v  # type: ignore[return-value]
+
+
+class QuarterlySnapshot(BaseModel):
+    """One quarter of financial data."""
+    period: str                           # e.g. "2024-Q3"
+    revenue: Optional[float] = None
+    gross_profit: Optional[float] = None
+    operating_income: Optional[float] = None
+    net_income: Optional[float] = None
+    free_cash_flow: Optional[float] = None
+    gross_margin: Optional[float] = None  # derived
+    operating_margin: Optional[float] = None  # derived
+
+    @field_validator("gross_margin", "operating_margin", mode="before")
+    @classmethod
+    def validate_margin(cls, v: object) -> Optional[float]:
+        """Coerce out-of-range margin values to None."""
+        if v is None:
+            return None
+        try:
+            v = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return None if abs(v) > 2.0 else v  # type: ignore[return-value]
+
+
+class AnnualSnapshot(BaseModel):
+    """One fiscal year of financial data with YoY growth rates."""
+    year: str                               # e.g. "2024"
+    revenue: Optional[float] = None
+    gross_profit: Optional[float] = None
+    operating_income: Optional[float] = None
+    net_income: Optional[float] = None
+    free_cash_flow: Optional[float] = None
+    total_debt: Optional[float] = None
+    net_debt: Optional[float] = None        # total_debt - cash (positive = net debt)
+    gross_margin: Optional[float] = None    # derived
+    operating_margin: Optional[float] = None  # derived
+    net_margin: Optional[float] = None      # derived
+    revenue_growth_yoy: Optional[float] = None  # derived vs prior year
+    interest_coverage: Optional[float] = None   # operating_income / |interest_expense|
+
+    @field_validator("gross_margin", "operating_margin", "net_margin", mode="before")
+    @classmethod
+    def validate_margin(cls, v: object) -> Optional[float]:
+        if v is None:
+            return None
+        try:
+            v = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return None if abs(v) > 2.0 else v  # type: ignore[return-value]
+
+    @field_validator("revenue_growth_yoy", mode="before")
+    @classmethod
+    def validate_growth(cls, v: object) -> Optional[float]:
+        if v is None:
+            return None
+        try:
+            v = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return None if abs(v) > 10.0 else v  # type: ignore[return-value]
+
+
+@dataclass
+class NewsItem:
+    title: str
+    publisher: str
+    link: str
+    published_at: str
+
+
+class MarketData(BaseModel):
+    symbol: str
+    yf_symbol: str
+    short_name: str
+    long_name: str
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    currency: str
+    asset_type: Literal["EQUITY", "ETF", "UNKNOWN"]
+    description: Optional[str] = None
+    metrics: ValuationMetrics
+    quarterly: list[QuarterlySnapshot] = Field(default_factory=list)
+    annual: list[AnnualSnapshot] = Field(default_factory=list)
+    news: list[NewsItem] = Field(default_factory=list)
+    fetch_error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_symbol(symbol: str) -> str:
+    """Apply exchange suffix overrides for European ETFs."""
+    return TICKER_OVERRIDES.get(symbol, symbol)
+
+
+def _extract_metrics(info: dict) -> ValuationMetrics:
+    """Extract valuation metrics from yfinance info dict."""
+    return ValuationMetrics(
+        pe_trailing=info.get("trailingPE"),
+        pe_forward=info.get("forwardPE"),
+        pb_ratio=info.get("priceToBook"),
+        ev_to_ebitda=info.get("enterpriseToEbitda"),
+        price_to_sales=info.get("priceToSalesTrailing12Months"),
+        debt_to_equity=info.get("debtToEquity"),
+        current_ratio=info.get("currentRatio"),
+        return_on_equity=info.get("returnOnEquity"),
+        return_on_assets=info.get("returnOnAssets"),
+        profit_margin=info.get("profitMargins"),
+        revenue_growth=info.get("revenueGrowth"),
+        earnings_growth=info.get("earningsGrowth"),
+        dividend_yield=info.get("dividendYield"),
+        fifty_two_week_high=info.get("fiftyTwoWeekHigh"),
+        fifty_two_week_low=info.get("fiftyTwoWeekLow"),
+        current_price=info.get("currentPrice") or info.get(
+            "regularMarketPrice"),
+        market_cap=info.get("marketCap"),
+        beta=info.get("beta"),
+        free_cash_flow_ttm=info.get("freeCashflow"),
+        total_debt=info.get("totalDebt"),
+        total_cash=info.get("totalCash"),
+        # ETF-specific fields (None for equities)
+        expense_ratio=info.get("annualReportExpenseRatio"),
+        total_assets=info.get("totalAssets"),
+        ytd_return=info.get("ytdReturn"),
+        three_year_avg_return=info.get("threeYearAverageReturn"),
+        five_year_avg_return=info.get("fiveYearAverageReturn"),
+    )
+
+
+def _safe_value(
+    df: pd.DataFrame,
+    row_name: str,
+    col: pd.Timestamp,
+) -> Optional[float]:
+    """Safely extract a single cell from a yfinance financial DataFrame."""
+    try:
+        if row_name in df.index:
+            val = df.loc[row_name, col]
+            if pd.notna(val):
+                return float(val)
+    except Exception:
+        pass
+    return None
+
+
+def _safe_value_multi(
+    df: pd.DataFrame,
+    row_names: list[str],
+    col: pd.Timestamp,
+) -> Optional[float]:
+    """Try multiple row names and return the first hit."""
+    for name in row_names:
+        val = _safe_value(df, name, col)
+        if val is not None:
+            return val
+    return None
+
+
+def _extract_quarterly_financials(
+    ticker: yf.Ticker,
+) -> list[QuarterlySnapshot]:
+    """
+    Extract last 4 quarters of key financial metrics.
+    Returns list ordered oldest → newest for trend reading.
+    ETFs return empty list gracefully.
+    """
+    try:
+        income = ticker.quarterly_income_stmt
+        cashflow = ticker.quarterly_cashflow
+
+        if income is None or income.empty:
+            return []
+
+        # yfinance returns columns as Timestamps, newest first
+        # Take up to 4 most recent quarters
+        quarters = income.columns[:4]
+        snapshots = []
+
+        for col in reversed(quarters):  # reverse so oldest first
+            period = col.strftime("%Y-Q") + str((col.month - 1) // 3 + 1)
+
+            revenue = _safe_value(income, "Total Revenue", col)
+            gross_profit = _safe_value(income, "Gross Profit", col)
+            operating_income = _safe_value(income, "Operating Income", col)
+            net_income = _safe_value(income, "Net Income", col)
+
+            # Free cash flow = operating CF - capex (capex is negative)
+            free_cash_flow = None
+            if cashflow is not None and not cashflow.empty \
+                    and col in cashflow.columns:
+                op_cf = _safe_value(cashflow, "Operating Cash Flow", col)
+                capex = _safe_value(cashflow, "Capital Expenditure", col)
+                if op_cf is not None and capex is not None:
+                    free_cash_flow = op_cf + capex
+
+            # Derived margins
+            gross_margin = None
+            operating_margin = None
+            if revenue and revenue != 0:
+                if gross_profit is not None:
+                    gross_margin = gross_profit / revenue
+                if operating_income is not None:
+                    operating_margin = operating_income / revenue
+
+            snapshots.append(QuarterlySnapshot(
+                period=period,
+                revenue=revenue,
+                gross_profit=gross_profit,
+                operating_income=operating_income,
+                net_income=net_income,
+                free_cash_flow=free_cash_flow,
+                gross_margin=gross_margin,
+                operating_margin=operating_margin,
+            ))
+
+        return snapshots
+
+    except Exception as e:
+        print(f"  Warning: Could not fetch quarterly financials: {e}")
+        return []
+
+
+def _extract_annual_financials(
+    ticker: yf.Ticker,
+) -> list[AnnualSnapshot]:
+    """
+    Extract last 4 fiscal years of key financial metrics with YoY growth.
+    Returns list ordered oldest → newest for trend r eading.
+    ETFs return empty list gracefully.
+    """
+    try:
+        income = ticker.income_stmt
+        cashflow = ticker.cashflow
+        balance = ticker.balance_sheet
+
+        if income is None or income.empty:
+            return []
+
+        # yfinance returns columns as Timestamps, newest first
+        # Take up to 4 most recent fiscal years
+        years = income.columns[:4]
+        snapshots = []
+        prev_revenue = None
+
+        for col in reversed(years):  # oldest first for YoY calculation
+            year = col.strftime("%Y")
+
+            revenue = _safe_value(income, "Total Revenue", col)
+            gross_profit = _safe_value(income, "Gross Profit", col)
+            operating_income = _safe_value(income, "Operating Income", col)
+            net_income = _safe_value(income, "Net Income", col)
+            interest_expense = _safe_value(income, "Interest Expense", col)
+
+            # Free cash flow = operating CF + capex (capex stored as negative)
+            free_cash_flow = None
+            if cashflow is not None and not cashflow.empty \
+                    and col in cashflow.columns:
+                op_cf = _safe_value(cashflow, "Operating Cash Flow", col)
+                capex = _safe_value(cashflow, "Capital Expenditure", col)
+                if op_cf is not None and capex is not None:
+                    free_cash_flow = op_cf + capex
+
+            # Debt and net debt from balance sheet
+            total_debt = None
+            net_debt = None
+            if balance is not None and not balance.empty \
+                    and col in balance.columns:
+                total_debt = _safe_value(balance, "Total Debt", col)
+                cash = _safe_value_multi(balance, [
+                    "Cash And Cash Equivalents",
+                    "Cash Cash Equivalents And Short Term Investments",
+                ], col)
+                if total_debt is not None and cash is not None:
+                    net_debt = total_debt - cash
+
+            # Derived margins
+            gross_margin = operating_margin = net_margin = None
+            if revenue and revenue != 0:
+                if gross_profit is not None:
+                    gross_margin = gross_profit / revenue
+                if operating_income is not None:
+                    operating_margin = operating_income / revenue
+                if net_income is not None:
+                    net_margin = net_income / revenue
+
+            # YoY revenue growth
+            revenue_growth_yoy = None
+            if prev_revenue and prev_revenue != 0 and revenue is not None:
+                revenue_growth_yoy = (revenue - prev_revenue) / abs(prev_revenue)
+            prev_revenue = revenue
+
+            # Interest coverage = operating income / |interest expense|
+            interest_coverage = None
+            if operating_income is not None and interest_expense is not None \
+                    and interest_expense != 0:
+                interest_coverage = operating_income / abs(interest_expense)
+
+            snapshots.append(AnnualSnapshot(
+                year=year,
+                revenue=revenue,
+                gross_profit=gross_profit,
+                operating_income=operating_income,
+                net_income=net_income,
+                free_cash_flow=free_cash_flow,
+                total_debt=total_debt,
+                net_debt=net_debt,
+                gross_margin=gross_margin,
+                operating_margin=operating_margin,
+                net_margin=net_margin,
+                revenue_growth_yoy=revenue_growth_yoy,
+                interest_coverage=interest_coverage,
+            ))
+
+        return snapshots
+
+    except Exception as e:
+        print(f"  Warning: Could not fetch annual financials: {e}")
+        return []
+
+
+def _extract_news(raw_news: list) -> list[NewsItem]:
+    """
+    Extract and clean news items from yfinance response.
+    Handles both old flat format and new nested 'content' format.
+    """
+    news_items = []
+    for item in raw_news[:10]:
+        try:
+            if "content" in item:
+                # New yfinance format (0.2.50+): news wrapped in content dict
+                content = item["content"]
+                title = content.get("title", "")
+                publisher = (content.get("provider") or {}).get("displayName", "")
+                link = (content.get("canonicalUrl") or {}).get("url", "")
+                pub_date = content.get("pubDate", "")
+                published_at = pub_date[:10] if pub_date else ""
+            else:
+                # Old flat format
+                title = item.get("title", "")
+                publisher = item.get("publisher", "")
+                link = item.get("link", "")
+                ts = item.get("providerPublishTime")
+                published_at = (
+                    datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else ""
+                )
+
+            if title:
+                news_items.append(NewsItem(
+                    title=title,
+                    publisher=publisher,
+                    link=link,
+                    published_at=published_at,
+                ))
+        except Exception:
+            continue
+    return news_items
+
+
+def _detect_asset_type(info: dict) -> Literal["EQUITY", "ETF", "UNKNOWN"]:
+    """Detect whether ticker is ETF, equity, or an unsupported type.
+
+    yfinance quoteType values: EQUITY, ETF, MUTUALFUND, CRYPTOCURRENCY,
+    INDEX, FUTURE, OPTION. Only EQUITY and ETF are analysable; everything
+    else is returned as UNKNOWN so callers can skip or flag gracefully.
+    """
+    qt = info.get("quoteType", "").upper()
+    if qt == "ETF":
+        return "ETF"
+    if qt == "EQUITY":
+        return "EQUITY"
+    return "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def fetch_market_data(symbol: str) -> MarketData:
+    """
+    Fetch market data for a single ticker symbol.
+    Includes valuation metrics, quarterly/annual financials and news.
+    """
+    yf_symbol = _resolve_symbol(symbol)
+
+    try:
+        ticker = yf.Ticker(yf_symbol)
+        info = ticker.info
+
+        if not info or (
+            info.get("regularMarketPrice") is None
+            and info.get("currentPrice") is None
+            and info.get("navPrice") is None
+        ):
+            return MarketData(
+                symbol=symbol,
+                yf_symbol=yf_symbol,
+                short_name=symbol,
+                long_name=symbol,
+                sector=None,
+                industry=None,
+                currency=info.get("currency", "UNKNOWN"),
+                asset_type="UNKNOWN",
+                description=None,
+                metrics=ValuationMetrics(),
+                quarterly=[],
+                annual=[],
+                news=[],
+                fetch_error=f"No price data found for {yf_symbol}",
+            )
+
+        asset_type = _detect_asset_type(info)
+
+        # Only fetch financials for equities — ETFs don't report earnings
+        quarterly = []
+        annual = []
+        if asset_type == "EQUITY":
+            quarterly = _extract_quarterly_financials(ticker)
+            annual = _extract_annual_financials(ticker)
+
+        news = _extract_news(ticker.news)
+
+        return MarketData(
+            symbol=symbol,
+            yf_symbol=yf_symbol,
+            short_name=info.get("shortName", symbol),
+            long_name=info.get("longName", symbol),
+            sector=info.get("sector"),
+            industry=info.get("industry"),
+            currency=info.get("currency", "UNKNOWN"),
+            asset_type=asset_type,
+            description=info.get("longBusinessSummary"),
+            metrics=_extract_metrics(info),
+            quarterly=quarterly,
+            annual=annual,
+            news=news,
+        )
+
+    except Exception as e:
+        return MarketData(
+            symbol=symbol,
+            yf_symbol=yf_symbol,
+            short_name=symbol,
+            long_name=symbol,
+            sector=None,
+            industry=None,
+            currency="UNKNOWN",
+            asset_type="UNKNOWN",
+            description=None,
+            metrics=ValuationMetrics(),
+            quarterly=[],
+            annual=[],
+            news=[],
+            fetch_error=str(e),
+        )
+
+
+def fetch_all_market_data(symbols: list[str]) -> dict[str, MarketData]:
+    """Fetch market data for all portfolio symbols concurrently."""
+    results: dict[str, MarketData] = {}
+
+    with ThreadPoolExecutor(max_workers=min(len(symbols), 6)) as executor:
+        future_to_symbol = {
+            executor.submit(fetch_market_data, symbol): symbol
+            for symbol in symbols
+        }
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            data = future.result()
+            results[symbol] = data
+
+            if data.fetch_error:
+                print(f"  {symbol}: Warning: {data.fetch_error}")
+            else:
+                q_count = len(data.quarterly)
+                a_count = len(data.annual)
+                print(f"  Fetching {symbol}..."
+                      f"\n    OK — {data.short_name} "
+                      f"({data.asset_type}"
+                      f"{f', {q_count}Q / {a_count}Y financials' if q_count else ''})")
+
+    return results
+
+
+if __name__ == "__main__":
+    symbols = ["NVDA", "AMZN", "AMD", "LX", "EXX1", "EXH1"]
+    market_data = fetch_all_market_data(symbols)
+
+    for symbol, data in market_data.items():
+        if data.fetch_error:
+            print(f"\n{symbol}: ERROR — {data.fetch_error}")
+            continue
+
+        print(f"\n{symbol} — {data.short_name} ({data.asset_type})")
+
+        if data.annual:
+            print("  Annual trend (oldest → newest):")
+            for a in data.annual:
+                rev = f"{a.revenue/1e9:.2f}B" if a.revenue else "N/A"
+                yoy = (f"{a.revenue_growth_yoy*100:+.1f}%"
+                       if a.revenue_growth_yoy is not None else "--")
+                gm = f"{a.gross_margin*100:.1f}%" if a.gross_margin else "N/A"
+                om = (f"{a.operating_margin*100:.1f}%"
+                      if a.operating_margin else "N/A")
+                nd = (f"{a.net_debt/1e9:+.2f}B"
+                      if a.net_debt is not None else "N/A")
+                print(f"    {a.year}: Rev={rev} ({yoy})  "
+                      f"GrsMgn={gm}  OpMgn={om}  NetDebt={nd}")
+        else:
+            print("  No annual financials (ETF or unavailable)")
