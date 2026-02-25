@@ -14,7 +14,7 @@ Flow:
 
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -106,6 +106,169 @@ def resolve_pdf() -> tuple[Path | None, bool]:
 
     return None, False
 
+def detect_sold_positions(
+    current_symbols: set[str],
+) -> list[str]:
+    """
+    Compare current portfolio against previous snapshot.
+    Returns symbols that were held before but are gone now.
+    """
+    client = get_client()
+    
+    # Get previous snapshot positions
+    prev_snapshot = client.table("portfolio_snapshots")\
+        .select("id")\
+        .order("created_at", desc=True)\
+        .offset(1) \
+        .limit(1)\
+        .execute()
+    
+    if not prev_snapshot.data:
+        return []
+    
+    prev_id = prev_snapshot.data[0]["id"]
+    prev_positions = client.table("positions")\
+        .select("symbol")\
+        .eq("snapshot_id", prev_id)\
+        .execute()
+    
+    prev_symbols = {r["symbol"] for r in prev_positions.data}
+    sold = prev_symbols - current_symbols
+    
+    return list(sold)
+
+def record_sold_position(symbol: str, statement_date: date) -> None:
+    """Store exit data for a position that just disappeared."""
+    import yfinance as yf
+    from src.ingestion.market import _resolve_symbol
+
+    client = get_client()
+
+    # Idempotency: skip if already recorded for this symbol + date
+    existing = client.table("sold_positions")\
+        .select("id")\
+        .eq("symbol", symbol)\
+        .eq("sold_at", str(statement_date))\
+        .limit(1)\
+        .execute()
+    if existing.data:
+        print(f"  {symbol}: already recorded as sold, skipping.")
+        return
+
+    # Get last analysis for this symbol
+    last_analysis = client.table("analyses")\
+        .select("*")\
+        .eq("symbol", symbol)\
+        .order("created_at", desc=True)\
+        .limit(1)\
+        .execute()
+
+    if not last_analysis.data:
+        return
+
+    analysis = last_analysis.data[0]
+
+    # Get last known position data
+    last_position = client.table("positions")\
+        .select("*")\
+        .eq("symbol", symbol)\
+        .order("created_at", desc=True)\
+        .limit(1)\
+        .execute()
+
+    pos = last_position.data[0] if last_position.data else {}
+
+    # Fetch per-share exit price in native currency from yfinance
+    exit_price = None
+    exit_currency = None
+    try:
+        info = yf.Ticker(_resolve_symbol(symbol)).info
+        exit_price = info.get("currentPrice") or info.get("regularMarketPrice")
+        exit_currency = info.get("currency")
+    except Exception as e:
+        print(f"  Warning: could not fetch exit price for {symbol}: {e}")
+
+    client.table("sold_positions").insert({
+        "symbol": symbol,
+        "sold_at": str(statement_date),
+        "exit_price_eur": exit_price,        # per-share, native currency
+        "exit_currency": exit_currency,
+        "quantity": pos.get("quantity"),
+        "last_recommendation": analysis.get("recommendation"),
+        "last_conviction": analysis.get("conviction"),
+        "last_analysis_id": analysis.get("id"),
+    }).execute()
+
+    print(f"Recorded exit for {symbol}")
+
+
+def evaluate_sold_positions() -> None:
+    """Fill in post-sale prices and compute verdict."""
+    import yfinance as yf
+    from src.ingestion.market import _resolve_symbol
+
+    client = get_client()
+
+    # Fetch rows where any time-bucket is still unfilled
+    result = client.table("sold_positions")\
+        .select("*")\
+        .or_("price_30d_after_sale.is.null,price_90d_after_sale.is.null,price_180d_after_sale.is.null")\
+        .execute()
+
+    for row in result.data:
+        sold_date = date.fromisoformat(row["sold_at"])
+        days_elapsed = (date.today() - sold_date).days
+
+        if days_elapsed < 30:
+            continue
+
+        info = yf.Ticker(_resolve_symbol(row["symbol"])).info
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+
+        if not current_price:
+            continue
+
+        exit_price = row["exit_price_eur"]   # now per-share in native currency
+        if not exit_price:
+            continue
+
+        return_pct = (current_price - exit_price) / exit_price * 100
+
+        # Verdict logic
+        # If price went up after you sold — premature
+        # If price went down after you sold — correct
+        # Threshold: 5% to avoid noise
+        verdict = None
+        if days_elapsed >= 90:
+            if return_pct > 5:
+                verdict = "premature"   # should have held
+            elif return_pct < -5:
+                verdict = "correct"     # good exit
+            else:
+                verdict = "neutral"     # didn't matter much
+
+        update_data = {}
+        if row["price_30d_after_sale"] is None and days_elapsed >= 30:
+            update_data["price_30d_after_sale"] = current_price
+            update_data["return_30d"] = return_pct
+        if row["price_90d_after_sale"] is None and days_elapsed >= 90:
+            update_data["price_90d_after_sale"] = current_price
+            update_data["return_90d"] = return_pct
+            update_data["verdict"] = verdict
+        if row["price_180d_after_sale"] is None and days_elapsed >= 180:
+            update_data["price_180d_after_sale"] = current_price
+            update_data["return_180d"] = return_pct
+
+        if not update_data:
+            continue
+
+        client.table("sold_positions")\
+            .update(update_data)\
+            .eq("id", row["id"])\
+            .execute()
+
+        print(f"{row['symbol']}: {verdict} — "
+              f"{return_pct:+.1f}% since sale")
 
 # ---------------------------------------------------------------------------
 # Main pipeline
@@ -159,8 +322,17 @@ def run_pipeline(force: bool = False) -> bool:
 
         tickers = [p.symbol for p in snapshot.positions]
 
+        # In update step alongside recommendation prices
+        evaluate_sold_positions()
+
         # --- Store snapshot ---
         snapshot_id = store_snapshot(snapshot)
+
+        sold = detect_sold_positions(set(tickers))
+
+        for symbol in sold:
+            print(f"Detected sale: {symbol}")
+            record_sold_position(symbol, snapshot.statement_date)
 
         # --- Run analysis ---
         portfolio_analysis = analyze_portfolio(snapshot)
