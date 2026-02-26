@@ -1,14 +1,16 @@
 """
-Market data fetcher using yfinance.
+Market data fetcher using yfinance (financials) and Finnhub (news).
 Fetches financial statements, valuation metrics, news and
 quarterly/annual financial trends for each position in the portfolio.
 """
 
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Literal, Optional
 
+import finnhub
 import pandas as pd
 import yfinance as yf
 from pydantic import BaseModel, Field, field_validator
@@ -18,6 +20,12 @@ from pydantic import BaseModel, Field, field_validator
 TICKER_OVERRIDES = {
     "EXX1": "EXX1.DE",
     "EXH1": "EXH1.DE",
+}
+
+# Thematic keywords for general news search (used for ETFs without direct Finnhub coverage)
+ETF_NEWS_THEMES: dict[str, list[str]] = {
+    "EXX1": ["european bank", "euro bank", "stoxx banks", "ecb", "european financial"],
+    "EXH1": ["european oil", "oil gas", "opec", "crude oil", "natural gas", "energy sector"],
 }
 
 
@@ -132,6 +140,28 @@ class NewsItem:
     publisher: str
     link: str
     published_at: str
+    summary: str = field(default="")
+
+
+class TechnicalIndicators(BaseModel):
+    """Price-based technical indicators computed from 1-year daily history."""
+    rsi_14: Optional[float] = None              # 0–100
+    macd: Optional[float] = None                # MACD line (12,26)
+    macd_signal: Optional[float] = None         # Signal line (9)
+    macd_hist: Optional[float] = None           # Histogram = macd − signal
+    sma_50: Optional[float] = None
+    sma_200: Optional[float] = None
+    price_vs_sma50: Optional[float] = None      # (price − sma50) / sma50
+    price_vs_sma200: Optional[float] = None
+    golden_cross: Optional[bool] = None         # sma50 > sma200
+    bb_upper: Optional[float] = None            # Bollinger upper (20, 2σ)
+    bb_lower: Optional[float] = None
+    bb_pct: Optional[float] = None              # %B — 0 = lower, 1 = upper
+    volume_ratio: Optional[float] = None        # 10d avg / 90d avg
+    price_52w_high: Optional[float] = None
+    price_52w_low: Optional[float] = None
+    pct_from_52w_high: Optional[float] = None   # negative = below high
+    pct_from_52w_low: Optional[float] = None    # positive = above low
 
 
 class MarketData(BaseModel):
@@ -148,6 +178,7 @@ class MarketData(BaseModel):
     quarterly: list[QuarterlySnapshot] = Field(default_factory=list)
     annual: list[AnnualSnapshot] = Field(default_factory=list)
     news: list[NewsItem] = Field(default_factory=list)
+    technicals: Optional[TechnicalIndicators] = None
     fetch_error: Optional[str] = None
 
 
@@ -385,42 +416,160 @@ def _extract_annual_financials(
         return []
 
 
-def _extract_news(raw_news: list) -> list[NewsItem]:
-    """
-    Extract and clean news items from yfinance response.
-    Handles both old flat format and new nested 'content' format.
-    """
-    news_items = []
-    for item in raw_news[:10]:
-        try:
-            if "content" in item:
-                # New yfinance format (0.2.50+): news wrapped in content dict
-                content = item["content"]
-                title = content.get("title", "")
-                publisher = (content.get("provider") or {}).get("displayName", "")
-                link = (content.get("canonicalUrl") or {}).get("url", "")
-                pub_date = content.get("pubDate", "")
-                published_at = pub_date[:10] if pub_date else ""
-            else:
-                # Old flat format
-                title = item.get("title", "")
-                publisher = item.get("publisher", "")
-                link = item.get("link", "")
-                ts = item.get("providerPublishTime")
-                published_at = (
-                    datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else ""
-                )
+def _get_finnhub_client() -> finnhub.Client:
+    return finnhub.Client(api_key=os.environ.get("FINNHUB_API_KEY", ""))
 
+
+def _parse_finnhub_news(items: list) -> list[NewsItem]:
+    """Parse raw Finnhub news items into NewsItem objects."""
+    news_items = []
+    for item in items:
+        try:
+            ts = item.get("datetime")
+            published_at = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else ""
+            title = item.get("headline", "")
             if title:
                 news_items.append(NewsItem(
                     title=title,
-                    publisher=publisher,
-                    link=link,
+                    publisher=item.get("source", ""),
+                    link=item.get("url", ""),
                     published_at=published_at,
+                    summary=item.get("summary", ""),
                 ))
         except Exception:
             continue
     return news_items
+
+
+def _fetch_news_finnhub(symbol: str, asset_type: str) -> list[NewsItem]:
+    """
+    Fetch news via Finnhub API.
+    - Equities: company-specific news for the past 14 days.
+    - ETFs: general financial news filtered by thematic keywords.
+    """
+    try:
+        client = _get_finnhub_client()
+        today = datetime.now().strftime("%Y-%m-%d")
+        from_date = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+
+        if asset_type == "EQUITY":
+            raw = client.company_news(symbol, _from=from_date, to=today)
+            return _parse_finnhub_news(raw[:10])
+        else:
+            # ETF: filter general financial news by thematic keywords
+            keywords = ETF_NEWS_THEMES.get(symbol, [])
+            if not keywords:
+                return []
+            raw = client.general_news("general")
+            filtered = [
+                item for item in raw
+                if any(
+                    kw.lower() in (
+                        item.get("headline", "") + " " + item.get("summary", "")
+                    ).lower()
+                    for kw in keywords
+                )
+            ]
+            return _parse_finnhub_news(filtered[:10])
+
+    except Exception as e:
+        print(f"  Warning: Finnhub news fetch failed for {symbol}: {e}")
+        return []
+
+
+def _compute_technicals(ticker: yf.Ticker, symbol: str) -> TechnicalIndicators:
+    """
+    Compute RSI(14), MACD(12,26,9), SMA(50/200), Bollinger Bands(20,2),
+    volume ratio and 52-week range from 1 year of daily price history.
+    Uses pure pandas — no extra dependencies.
+    """
+    try:
+        hist = ticker.history(period="1y")
+        if hist.empty or len(hist) < 30:
+            return TechnicalIndicators()
+
+        close = hist["Close"].dropna()
+        volume = hist["Volume"].dropna()
+
+        if len(close) < 30:
+            return TechnicalIndicators()
+
+        current = float(close.iloc[-1])
+
+        def _safe(series) -> Optional[float]:
+            val = series.iloc[-1]
+            return float(val) if not pd.isna(val) else None
+
+        # --- RSI (14) ---
+        delta = close.diff()
+        avg_gain = delta.clip(lower=0).ewm(com=13, min_periods=14).mean()
+        avg_loss = (-delta.clip(upper=0)).ewm(com=13, min_periods=14).mean()
+        rs = avg_gain / avg_loss.replace(0, float("nan"))
+        rsi_series = 100 - 100 / (1 + rs)
+        rsi_val = _safe(rsi_series)
+
+        # --- MACD (12, 26, 9) ---
+        ema12 = close.ewm(span=12, min_periods=12).mean()
+        ema26 = close.ewm(span=26, min_periods=26).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, min_periods=9).mean()
+        macd_hist_series = macd_line - signal_line
+        macd_val = _safe(macd_line)
+        signal_val = _safe(signal_line)
+        hist_val = _safe(macd_hist_series)
+
+        # --- SMAs ---
+        sma50 = _safe(close.rolling(50).mean()) if len(close) >= 50 else None
+        sma200 = _safe(close.rolling(200).mean()) if len(close) >= 200 else None
+        price_vs_sma50 = (current - sma50) / sma50 if sma50 else None
+        price_vs_sma200 = (current - sma200) / sma200 if sma200 else None
+        golden_cross = (sma50 > sma200) if (sma50 is not None and sma200 is not None) else None
+
+        # --- Bollinger Bands (20, 2σ) ---
+        bb_mid = close.rolling(20).mean()
+        bb_std = close.rolling(20).std()
+        bb_u = _safe(bb_mid + 2 * bb_std)
+        bb_l = _safe(bb_mid - 2 * bb_std)
+        bb_pct = (current - bb_l) / (bb_u - bb_l) if (bb_u and bb_l and bb_u != bb_l) else None
+
+        # --- Volume ratio (10d avg vs 90d avg) ---
+        vol_ratio = None
+        if len(volume) >= 10:
+            v10 = float(volume.tail(10).mean())
+            v90 = float(volume.tail(90).mean()) if len(volume) >= 30 else None
+            if v90 and v90 > 0:
+                vol_ratio = v10 / v90
+
+        # --- 52-week range ---
+        w52 = close.tail(252)
+        high_52w = float(w52.max())
+        low_52w = float(w52.min())
+        pct_from_high = (current - high_52w) / high_52w
+        pct_from_low = (current - low_52w) / low_52w if low_52w != 0 else None
+
+        return TechnicalIndicators(
+            rsi_14=rsi_val,
+            macd=macd_val,
+            macd_signal=signal_val,
+            macd_hist=hist_val,
+            sma_50=sma50,
+            sma_200=sma200,
+            price_vs_sma50=price_vs_sma50,
+            price_vs_sma200=price_vs_sma200,
+            golden_cross=golden_cross,
+            bb_upper=bb_u,
+            bb_lower=bb_l,
+            bb_pct=bb_pct,
+            volume_ratio=vol_ratio,
+            price_52w_high=high_52w,
+            price_52w_low=low_52w,
+            pct_from_52w_high=pct_from_high,
+            pct_from_52w_low=pct_from_low,
+        )
+
+    except Exception as e:
+        print(f"  Warning: Could not compute technicals for {symbol}: {e}")
+        return TechnicalIndicators()
 
 
 def _detect_asset_type(info: dict) -> Literal["EQUITY", "ETF", "UNKNOWN"]:
@@ -484,7 +633,8 @@ def fetch_market_data(symbol: str) -> MarketData:
             quarterly = _extract_quarterly_financials(ticker)
             annual = _extract_annual_financials(ticker)
 
-        news = _extract_news(ticker.news)
+        news = _fetch_news_finnhub(symbol, asset_type)
+        technicals = _compute_technicals(ticker, symbol)
 
         return MarketData(
             symbol=symbol,
@@ -500,6 +650,7 @@ def fetch_market_data(symbol: str) -> MarketData:
             quarterly=quarterly,
             annual=annual,
             news=news,
+            technicals=technicals,
         )
 
     except Exception as e:

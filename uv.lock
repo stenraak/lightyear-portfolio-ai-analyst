@@ -293,6 +293,18 @@ wheels = [
 ]
 
 [[package]]
+name = "finnhub-python"
+version = "2.4.27"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/03/86/6bcf8c3514683198ad07160efd2426d4898275a3e11cdd3ebed659e75d7a/finnhub_python-2.4.27.tar.gz", hash = "sha256:c4402f481005bbb48f72acfa14d7c91e95af1b1c8367ba2f4457eebe4e61b611", size = 13613, upload-time = "2026-01-26T04:39:58.352Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ea/97/6b0e320f7825345ba5754d2da337086598bd04076aa18e0269812ef4f5f3/finnhub_python-2.4.27-py3-none-any.whl", hash = "sha256:2e5bd70ea9c41c077224d9eaebaa2b9c66e0445d4b4d2768fee20a56ce2af07f", size = 12013, upload-time = "2026-01-26T04:39:56.909Z" },
+]
+
+[[package]]
 name = "frozendict"
 version = "2.4.7"
 source = { registry = "https://pypi.org/simple" }
@@ -487,6 +499,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "finnhub-python" },
     { name = "groq" },
     { name = "jinja2" },
     { name = "pandas" },
@@ -507,6 +520,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.83.0" },
+    { name = "finnhub-python", specifier = ">=2.4.27" },
     { name = "groq", specifier = ">=1.0.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "pandas", specifier = ">=3.0.1" },

@@ -113,6 +113,160 @@ def _fmt_coverage(val) -> str:
     return f"{val:.1f}x"
 
 
+def _signal_color(signal: str) -> str:
+    match signal.lower():
+        case "bullish":
+            return "#22c55e"
+        case "bearish":
+            return "#ef4444"
+        case _:
+            return "#94a3b8"
+
+
+def _render_technicals_panel(market_data: Optional[MarketData]) -> str:
+    """
+    Render a visual technical indicators panel:
+    - Signal pills row (RSI zone, MACD, MA cross, Bollinger, Volume)
+    - 52-week range bar with price marker
+    - Two-column metrics table
+    """
+    if not market_data or not market_data.technicals:
+        return ""
+    t = market_data.technicals
+    if all(v is None for v in [t.rsi_14, t.macd, t.sma_50, t.bb_pct]):
+        return ""
+
+    # --- Signal pills ---
+    pills = []
+
+    if t.rsi_14 is not None:
+        if t.rsi_14 < 30:
+            c, label = "#22c55e", f"RSI {t.rsi_14:.0f} — Oversold"
+        elif t.rsi_14 > 70:
+            c, label = "#ef4444", f"RSI {t.rsi_14:.0f} — Overbought"
+        else:
+            c, label = "#64748b", f"RSI {t.rsi_14:.0f} — Neutral"
+        pills.append((c, label))
+
+    if t.macd is not None and t.macd_signal is not None:
+        if t.macd > t.macd_signal:
+            pills.append(("#22c55e", "MACD ↑ Bullish"))
+        else:
+            pills.append(("#ef4444", "MACD ↓ Bearish"))
+
+    if t.golden_cross is not None:
+        if t.golden_cross:
+            pills.append(("#22c55e", "Golden Cross"))
+        else:
+            pills.append(("#ef4444", "Death Cross"))
+
+    if t.bb_pct is not None:
+        if t.bb_pct > 0.8:
+            pills.append(("#ef4444", f"BB Upper {t.bb_pct:.0%}"))
+        elif t.bb_pct < 0.2:
+            pills.append(("#22c55e", f"BB Lower {t.bb_pct:.0%}"))
+        else:
+            pills.append(("#64748b", f"BB Mid {t.bb_pct:.0%}"))
+
+    if t.volume_ratio is not None:
+        if t.volume_ratio > 1.3:
+            pills.append(("#818cf8", f"Vol {t.volume_ratio:.1f}x ↑ High"))
+        elif t.volume_ratio < 0.7:
+            pills.append(("#475569", f"Vol {t.volume_ratio:.1f}x ↓ Low"))
+        else:
+            pills.append(("#64748b", f"Vol {t.volume_ratio:.1f}x Normal"))
+
+    pills_html = " ".join(
+        f"<span style='font-size:11px;padding:3px 10px;border-radius:12px;"
+        f"background:{c}22;color:{c};border:1px solid {c}55;white-space:nowrap;'>"
+        f"{label}</span>"
+        for c, label in pills
+    )
+
+    # --- 52-week range bar ---
+    range_bar = ""
+    price = market_data.metrics.current_price
+    if t.price_52w_high and t.price_52w_low and price:
+        rng = t.price_52w_high - t.price_52w_low
+        pos_pct = max(0.0, min(100.0, (price - t.price_52w_low) / rng * 100)) if rng > 0 else 50.0
+        from_high = f"{t.pct_from_52w_high * 100:.1f}%" if t.pct_from_52w_high is not None else ""
+        range_bar = f"""
+        <div style="margin-top:14px;">
+            <div style="display:flex;justify-content:space-between;
+                        font-size:11px;color:#475569;margin-bottom:6px;">
+                <span>{t.price_52w_low:.2f} <span style="color:#64748b;">52w Low</span></span>
+                <span style="color:#94a3b8;font-size:10px;">— 52-Week Range —</span>
+                <span><span style="color:#64748b;">52w High</span> {t.price_52w_high:.2f}</span>
+            </div>
+            <div style="position:relative;height:6px;background:#0f172a;border-radius:3px;">
+                <div style="position:absolute;left:{pos_pct:.1f}%;transform:translateX(-50%);
+                            width:14px;height:14px;background:#6366f1;border-radius:50%;
+                            top:-4px;box-shadow:0 0 0 3px #6366f133;"></div>
+            </div>
+            <div style="text-align:center;font-size:11px;color:#64748b;margin-top:8px;">
+                {price:.2f}
+                <span style="color:#475569;margin-left:4px;">
+                    ({from_high} from high &nbsp;·&nbsp; {pos_pct:.0f}% of range)
+                </span>
+            </div>
+        </div>"""
+
+    # --- Metrics table (two columns) ---
+    def _metric_val(val, fmt=".2f", color_fn=None) -> str:
+        if val is None:
+            return "<span style='color:#334155'>—</span>"
+        txt = f"{val:{fmt}}"
+        color = color_fn(val) if color_fn else "#94a3b8"
+        return f"<span style='color:{color}'>{txt}</span>"
+
+    def _pct_color(v): return "#22c55e" if v > 0 else "#ef4444"
+    def _rsi_color(v): return "#22c55e" if v < 30 else "#ef4444" if v > 70 else "#94a3b8"
+    def _hist_color(v): return "#22c55e" if v > 0 else "#ef4444"
+
+    rows = [
+        ("RSI (14)",      _metric_val(t.rsi_14,           ".1f",  _rsi_color)),
+        ("MACD",          _metric_val(t.macd,              ".3f")),
+        ("MACD Signal",   _metric_val(t.macd_signal,       ".3f")),
+        ("MACD Hist",     _metric_val(t.macd_hist,         "+.3f", _hist_color)),
+        ("SMA (50)",      _metric_val(t.sma_50,            ".2f")),
+        ("vs SMA50",      _metric_val(t.price_vs_sma50,    "+.1%", _pct_color)),
+        ("SMA (200)",     _metric_val(t.sma_200,           ".2f")),
+        ("vs SMA200",     _metric_val(t.price_vs_sma200,   "+.1%", _pct_color)),
+        ("Bollinger %B",  _metric_val(t.bb_pct,            ".2f")),
+        ("Volume ratio",  _metric_val(t.volume_ratio,      ".2f")),
+    ]
+
+    def _tr(label, val_html):
+        return (
+            f"<tr>"
+            f"<td style='color:#475569;padding:3px 8px;font-size:11px;"
+            f"white-space:nowrap;'>{label}</td>"
+            f"<td style='padding:3px 8px;font-size:12px;text-align:right;"
+            f"font-variant-numeric:tabular-nums;'>{val_html}</td>"
+            f"</tr>"
+        )
+
+    mid = len(rows) // 2
+    left_html = "".join(_tr(l, v) for l, v in rows[:mid])
+    right_html = "".join(_tr(l, v) for l, v in rows[mid:])
+
+    metrics_html = f"""
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:12px;">
+            <table style="border-collapse:collapse;width:100%;
+                          background:#0f172a;border-radius:6px;">{left_html}</table>
+            <table style="border-collapse:collapse;width:100%;
+                          background:#0f172a;border-radius:6px;">{right_html}</table>
+        </div>"""
+
+    return f"""
+    <div style="margin-top:16px;padding-top:16px;border-top:1px solid #334155;">
+        <div class="metric-label" style="margin-bottom:10px;">Technical Indicators</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">{pills_html}</div>
+        {range_bar}
+        {metrics_html}
+    </div>"""
+
+
 def _render_quarterly_table(market_data: Optional[MarketData]) -> str:
     """Render quarterly financial snapshot table from real MarketData."""
     if not market_data or not market_data.quarterly:
@@ -270,6 +424,10 @@ def _render_equity_body(analysis: PositionAnalysis,
 
     quarterly_table = _render_quarterly_table(market_data)
     annual_table = _render_financial_table(market_data)
+    technicals_panel = _render_technicals_panel(market_data)
+
+    tech = raw.get("technical_analysis", {})
+    tech_signal_color = _signal_color(tech.get("signal", "neutral"))
 
     bull = raw.get("bull_case", {})
     bear = raw.get("bear_case", {})
@@ -341,7 +499,9 @@ def _render_equity_body(analysis: PositionAnalysis,
         {quarterly_table}
         {annual_table}
 
-        <div class="grid-2" style="margin-top:16px;">
+        {technicals_panel}
+
+        <div class="grid-3" style="margin-top:16px;">
             <div class="metric-block">
                 <div class="metric-label">Valuation —
                     <span style="color:#f59e0b">
@@ -349,6 +509,14 @@ def _render_equity_body(analysis: PositionAnalysis,
                     </span>
                 </div>
                 <p class="metric-summary">{val.get("summary", "")}</p>
+            </div>
+            <div class="metric-block">
+                <div class="metric-label">Technicals —
+                    <span style="color:{tech_signal_color}">
+                        {tech.get("signal", "").upper()}
+                    </span>
+                </div>
+                <p class="metric-summary">{tech.get("summary", "")}</p>
             </div>
             <div class="metric-block">
                 <div class="metric-label">News Sentiment —
@@ -371,7 +539,8 @@ def _render_equity_body(analysis: PositionAnalysis,
 # ETF card body
 # ---------------------------------------------------------------------------
 
-def _render_etf_body(analysis: PositionAnalysis) -> str:
+def _render_etf_body(analysis: PositionAnalysis,
+                     market_data: Optional[MarketData] = None) -> str:
     raw = analysis.raw
     fq = raw.get("fund_quality", {})
     te = raw.get("thematic_exposure", {})
@@ -385,6 +554,9 @@ def _render_etf_body(analysis: PositionAnalysis) -> str:
     )
     sentiment_color = _sentiment_color(news.get("sentiment", "neutral"))
     risks_list = "".join(f"<li>{r}</li>" for r in risks.get("key_risks", []))
+
+    tech = raw.get("technical_analysis", {})
+    tech_signal_color = _signal_color(tech.get("signal", "neutral"))
 
     bull = raw.get("bull_case", {})
     bear = raw.get("bear_case", {})
@@ -435,7 +607,9 @@ def _render_etf_body(analysis: PositionAnalysis) -> str:
             </div>
         </div>
 
-        <div class="grid-2" style="margin-top:16px;">
+        {_render_technicals_panel(market_data)}
+
+        <div class="grid-3" style="margin-top:16px;">
             <div class="metric-block">
                 <div class="metric-label">Valuation —
                     <span style="color:#f59e0b">
@@ -443,6 +617,14 @@ def _render_etf_body(analysis: PositionAnalysis) -> str:
                     </span>
                 </div>
                 <p class="metric-summary">{val.get("summary", "")}</p>
+            </div>
+            <div class="metric-block">
+                <div class="metric-label">Technicals —
+                    <span style="color:{tech_signal_color}">
+                        {tech.get("signal", "").upper()}
+                    </span>
+                </div>
+                <p class="metric-summary">{tech.get("summary", "")}</p>
             </div>
             <div class="metric-block">
                 <div class="metric-label">News Sentiment —
@@ -476,7 +658,7 @@ def _render_position_card(analysis: PositionAnalysis,
         </div>"""
 
     if analysis.asset_type == "ETF":
-        body = _render_etf_body(analysis)
+        body = _render_etf_body(analysis, market_data)
     else:
         body = _render_equity_body(analysis, market_data)
 

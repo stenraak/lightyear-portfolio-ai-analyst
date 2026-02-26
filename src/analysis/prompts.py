@@ -5,7 +5,7 @@ Separate prompt schemas for equities vs ETFs.
 """
 
 from src.ingestion.lightyear import Position
-from src.ingestion.market import MarketData, QuarterlySnapshot, AnnualSnapshot
+from src.ingestion.market import MarketData, QuarterlySnapshot, AnnualSnapshot, TechnicalIndicators
 from typing import Optional
 
 
@@ -156,6 +156,63 @@ def _build_annual_section(annual: list[AnnualSnapshot]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Technical indicators section builder
+# ---------------------------------------------------------------------------
+
+def _build_technicals_section(market_data: MarketData) -> str:
+    """Format TechnicalIndicators into a readable text block for the LLM."""
+    t = market_data.technicals
+    if t is None:
+        return "No technical data available."
+
+    lines = []
+
+    if t.rsi_14 is not None:
+        zone = "OVERSOLD" if t.rsi_14 < 30 else "OVERBOUGHT" if t.rsi_14 > 70 else "NEUTRAL"
+        lines.append(f"RSI(14):         {t.rsi_14:.1f}  [{zone}]")
+
+    if t.macd is not None and t.macd_signal is not None:
+        direction = "BULLISH" if t.macd > t.macd_signal else "BEARISH"
+        lines.append(
+            f"MACD(12,26,9):   line={t.macd:.3f}  signal={t.macd_signal:.3f}"
+            f"  hist={t.macd_hist:+.3f}  [{direction}]"
+        )
+
+    if t.sma_50 is not None:
+        vs = f"{t.price_vs_sma50 * 100:+.1f}%" if t.price_vs_sma50 is not None else "N/A"
+        lines.append(f"SMA(50):         {t.sma_50:.2f}  (price {vs} vs SMA50)")
+
+    if t.sma_200 is not None:
+        vs = f"{t.price_vs_sma200 * 100:+.1f}%" if t.price_vs_sma200 is not None else "N/A"
+        lines.append(f"SMA(200):        {t.sma_200:.2f}  (price {vs} vs SMA200)")
+
+    if t.golden_cross is not None:
+        cross = "GOLDEN CROSS — SMA50 > SMA200 (bullish)" if t.golden_cross else "DEATH CROSS — SMA50 < SMA200 (bearish)"
+        lines.append(f"MA trend:        {cross}")
+
+    if t.bb_pct is not None:
+        zone = "near upper band" if t.bb_pct > 0.8 else "near lower band" if t.bb_pct < 0.2 else "mid-band"
+        lines.append(
+            f"Bollinger(20,2): upper={t.bb_upper:.2f}  lower={t.bb_lower:.2f}"
+            f"  %B={t.bb_pct:.2f}  [{zone}]"
+        )
+
+    if t.volume_ratio is not None:
+        vol_desc = "elevated" if t.volume_ratio > 1.3 else "subdued" if t.volume_ratio < 0.7 else "normal"
+        lines.append(f"Volume ratio:    {t.volume_ratio:.2f}x  (10d avg / 90d avg)  [{vol_desc}]")
+
+    if t.price_52w_high is not None and t.price_52w_low is not None:
+        from_high = f"{t.pct_from_52w_high * 100:.1f}%" if t.pct_from_52w_high is not None else "N/A"
+        from_low = f"{t.pct_from_52w_low * 100:+.1f}%" if t.pct_from_52w_low is not None else "N/A"
+        lines.append(
+            f"52w range:       low={t.price_52w_low:.2f}  high={t.price_52w_high:.2f}"
+            f"  ({from_high} from high, {from_low} from low)"
+        )
+
+    return "\n".join(lines) if lines else "No technical data available."
+
+
+# ---------------------------------------------------------------------------
 # Equity analysis prompt
 # ---------------------------------------------------------------------------
 
@@ -169,6 +226,7 @@ def build_analysis_prompt(position: Position, market_data: MarketData) -> str:
 
     news_text = "\n".join(
         f"- [{n.published_at}] {n.title} ({n.publisher})"
+        + (f"\n  {n.summary[:250]}" if n.summary else "")
         for n in market_data.news
     ) or "No recent news available."
 
@@ -178,6 +236,7 @@ def build_analysis_prompt(position: Position, market_data: MarketData) -> str:
 
     annual_section = _build_annual_section(market_data.annual)
     quarterly_section = _build_quarterly_section(market_data.quarterly)
+    technicals_section = _build_technicals_section(market_data)
 
     prompt = f"""## Position
 Symbol:       {position.symbol}
@@ -223,6 +282,9 @@ Net Debt (TTM):   {_fmt_signed(net_debt_ttm)}
 ## Business Description
 {(market_data.description or 'N/A')[:800]}
 
+## Technical Analysis
+{technicals_section}
+
 ## Recent News Headlines
 {news_text}
 
@@ -241,6 +303,10 @@ BOTH a bull case and a bear case before synthesising a recommendation.
   Specifically: if forward P/E is available, compute the implied EPS CAGR needed
   to justify it at a 15x exit multiple over 3 years and state whether the actual
   revenue/earnings trajectory supports that rate.
+- Technical analysis: Synthesise RSI zone, MACD direction, moving average
+  trend (golden/death cross), Bollinger Band position, and volume ratio into
+  an overall technical signal. Do the technicals confirm or contradict the
+  fundamental thesis? Call out any divergences explicitly.
 - Risks & news: Specific risks with actual numbers. What are the headlines
   signalling about near-term momentum or potential risks/opportunities?
 - Bull case: The most optimistic scenario the data can plausibly support over
@@ -288,6 +354,10 @@ Return ONLY this JSON structure:
       "<specific risk with data>",
       "<specific risk with data>"
     ]
+  }},
+  "technical_analysis": {{
+    "signal": "<bullish|neutral|bearish>",
+    "summary": "<2-3 sentences — RSI zone, MACD direction, MA trend, BB position. Do technicals confirm or contradict the fundamental thesis?>"
   }},
   "news_sentiment": {{
     "sentiment": "<positive|neutral|negative>",
@@ -345,8 +415,11 @@ def build_etf_analysis_prompt(position: Position, market_data: MarketData) -> st
 
     news_text = "\n".join(
         f"- [{n.published_at}] {n.title} ({n.publisher})"
+        + (f"\n  {n.summary[:250]}" if n.summary else "")
         for n in market_data.news
     ) or "No recent news available."
+
+    technicals_section = _build_technicals_section(market_data)
 
     # ETF performance metrics
     expense_pct = f"{m.expense_ratio * 100:.2f}%" if m.expense_ratio else "N/A"
@@ -385,6 +458,9 @@ YTD return:       {ytd}
 ## Fund Description
 {(market_data.description or 'N/A')[:800]}
 
+## Technical Analysis
+{technicals_section}
+
 ## Recent News Headlines
 {news_text}
 
@@ -398,6 +474,9 @@ case before synthesising a recommendation.
   tailwinds structural or cyclical? Is the theme already priced in?
 - Valuation: Is the sector at a premium or discount to historical range?
 - Risks: Concentration, rate sensitivity, currency, regulatory, fee drag.
+- Technical analysis: Synthesise RSI zone, MACD direction, moving average
+  trend, Bollinger Band position, and volume ratio. Does the technical picture
+  confirm or contradict the macro/thematic thesis for this ETF?
 - News: What do headlines signal about the theme or sector right now?
 - Bull case: Describe the scenario where macro tailwinds materialise, AUM
   grows, and the theme delivers above-market returns. What specific conditions
@@ -440,6 +519,10 @@ Return ONLY this JSON structure:
       "<specific risk with data>",
       "<specific risk with data>"
     ]
+  }},
+  "technical_analysis": {{
+    "signal": "<bullish|neutral|bearish>",
+    "summary": "<2-3 sentences — RSI zone, MACD direction, MA trend, BB position. Do technicals confirm the macro/thematic thesis?>"
   }},
   "news_sentiment": {{
     "sentiment": "<positive|neutral|negative>",

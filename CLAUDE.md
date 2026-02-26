@@ -9,7 +9,7 @@ generates HTML reports. Runs on a 5-day cron schedule via Railway.
 - Python 3.13, UV for package management (not pip)
 - Anthropic Claude API (production) / Groq Llama (development)
 - Supabase for storage (PostgreSQL + file storage)
-- yfinance for market data
+- yfinance for market data (financials/metrics); Finnhub for news
 - pdfplumber for PDF parsing
 - FastAPI, Railway for deployment
 
@@ -25,6 +25,7 @@ main.py          — Entry point with 5-day trigger logic
 - All DB operations go through src/database/supabase_client.py
 - LLM provider is swappable via LLM_PROVIDER in .env (groq or anthropic)
 - ETFs (EXX1, EXH1) need .DE suffix for yfinance — handled in TICKER_OVERRIDES
+- ETF news uses Finnhub general_news filtered by ETF_NEWS_THEMES keywords in market.py
 - Quarterly financials only fetched for EQUITY type, not ETFs
 - Tests: unit tests in test_*.py, integration tests in test_*_integration.py
 - Run all tests: `uv run pytest tests/ -v`
@@ -32,7 +33,7 @@ main.py          — Entry point with 5-day trigger logic
 - Always run with force end to end after doing changes
 
 ## Environment Variables Required
-SUPABASE_URL, SUPABASE_KEY, GROQ_API_KEY, ANTHROPIC_API_KEY, LLM_PROVIDER
+SUPABASE_URL, SUPABASE_KEY, GROQ_API_KEY, ANTHROPIC_API_KEY, LLM_PROVIDER, FINNHUB_API_KEY
 
 ## What To Avoid
 - Never hardcode API keys
