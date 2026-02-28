@@ -9,7 +9,9 @@ import os
 import re
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+import pandas as pd
+
+from pydantic import BaseModel, Field
 
 from dotenv import load_dotenv
 
@@ -57,7 +59,7 @@ def _call_groq(prompt: str, system: str) -> str:
             {"role": "user", "content": prompt},
         ],
         temperature=0.3,
-        max_tokens=4000
+        max_tokens=5000
     )
     final_output = response.choices[0].message.content
     if final_output:
@@ -72,7 +74,7 @@ def _call_anthropic(prompt: str, system: str) -> str:
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=4000,
+        max_tokens=5000,
         temperature=0.3,
         system=system,
         messages=[{"role": "user", "content": prompt}],
@@ -134,6 +136,97 @@ class PortfolioAnalysis(BaseModel):
     positions: list[PositionAnalysis]
     portfolio_summary: dict      # parsed JSON from portfolio summary prompt
     market_data: dict[str, Any]  # dict[str, MarketData] — Any avoids cross-module forward ref
+    correlation_matrix: dict[str, dict[str, float]] = Field(default_factory=dict)
+    sizing_alignment: list[dict] = Field(default_factory=list)
+    portfolio_beta: Optional[float] = None
+    drawdown_scenarios: list[dict] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Portfolio-level compute helpers
+# ---------------------------------------------------------------------------
+
+def _compute_correlation_matrix(market_data: dict[str, Any]) -> dict[str, dict[str, float]]:
+    returns: dict[str, Any] = {}
+    for sym, md in market_data.items():
+        if hasattr(md, "price_history") and len(md.price_history) > 20:
+            prices = pd.Series(md.price_history)
+            ret = prices.pct_change().dropna()
+            if len(ret) > 10:
+                returns[sym] = ret
+    if len(returns) < 2:
+        return {}
+    min_len = min(len(r) for r in returns.values())
+    df = pd.DataFrame({sym: ret.iloc[-min_len:].values for sym, ret in returns.items()})
+    corr = df.corr()
+    return {
+        sym: {other: round(float(corr.loc[sym, other]), 2) for other in corr.columns}
+        for sym in corr.index
+    }
+
+
+def _compute_sizing_alignment(
+    snapshot: Any,
+    position_analyses: list[PositionAnalysis],
+) -> list[dict]:
+    total = snapshot.total_investments_eur
+    if total <= 0:
+        return []
+    analysis_map = {a.symbol: a for a in position_analyses}
+    result = []
+    for pos in snapshot.positions:
+        a = analysis_map.get(pos.symbol)
+        if not a:
+            continue
+        weight = pos.value_eur / total
+        flag = None
+        if a.recommendation == "buy" and a.conviction == "high" and weight < 0.10:
+            flag = "undersized_high_conviction_buy"
+        elif a.recommendation == "sell" and weight > 0.20:
+            flag = "oversized_sell"
+        elif a.recommendation == "buy" and a.conviction == "low" and weight > 0.25:
+            flag = "oversized_low_conviction"
+        result.append({
+            "symbol": pos.symbol,
+            "weight_pct": round(weight * 100, 1),
+            "value_eur": round(pos.value_eur, 2),
+            "action": a.recommendation,
+            "conviction": a.conviction,
+            "flag": flag,
+        })
+    return sorted(result, key=lambda x: x["weight_pct"], reverse=True)
+
+
+def _compute_portfolio_beta_and_drawdowns(
+    snapshot: Any,
+    market_data: dict[str, Any],
+) -> tuple[Optional[float], list[dict]]:
+    total = snapshot.total_investments_eur
+    if total <= 0:
+        return None, []
+    weighted_beta = 0.0
+    covered_eur = 0.0
+    for pos in snapshot.positions:
+        md = market_data.get(pos.symbol)
+        if md and hasattr(md, "metrics") and md.metrics.beta is not None:
+            w = pos.value_eur / total
+            weighted_beta += w * md.metrics.beta
+            covered_eur += pos.value_eur
+    covered_fraction = covered_eur / total
+    if covered_fraction < 0.3:
+        return None, []
+    if covered_fraction < 1.0:
+        weighted_beta /= covered_fraction  # normalise for missing betas
+    beta = round(weighted_beta, 2)
+    drawdowns = [
+        {
+            "market_pct": int(d * 100),
+            "portfolio_pct": round(d * beta * 100, 1),
+            "eur_impact": round(total * d * beta, 0),
+        }
+        for d in [-0.10, -0.15, -0.20, -0.30, -0.50]
+    ]
+    return beta, drawdowns
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +361,13 @@ def analyze_portfolio(snapshot: PortfolioSnapshot) -> PortfolioAnalysis:
                   f"({analysis.conviction} conviction) — "
                   f"{analysis.valuation_assessment}")
 
+    # Portfolio-level computations
+    correlation_matrix = _compute_correlation_matrix(market_data)
+    sizing_alignment = _compute_sizing_alignment(snapshot, position_analyses)
+    portfolio_beta, drawdown_scenarios = _compute_portfolio_beta_and_drawdowns(
+        snapshot, market_data
+    )
+
     # Portfolio summary — only use successful analyses
     successful = [a.raw for a in position_analyses if a.raw]
     portfolio_summary = {}
@@ -277,6 +377,11 @@ def analyze_portfolio(snapshot: PortfolioSnapshot) -> PortfolioAnalysis:
         summary_prompt = build_portfolio_summary_prompt(
             successful,
             snapshot.total_investments_eur,
+            market_data=market_data,
+            sizing_alignment=sizing_alignment,
+            portfolio_beta=portfolio_beta,
+            drawdown_scenarios=drawdown_scenarios,
+            correlation_matrix=correlation_matrix,
         )
         try:
             raw_summary = _call_llm(summary_prompt)
@@ -291,4 +396,8 @@ def analyze_portfolio(snapshot: PortfolioSnapshot) -> PortfolioAnalysis:
         positions=position_analyses,
         portfolio_summary=portfolio_summary,
         market_data=market_data,
+        correlation_matrix=correlation_matrix,
+        sizing_alignment=sizing_alignment,
+        portfolio_beta=portfolio_beta,
+        drawdown_scenarios=drawdown_scenarios,
     )

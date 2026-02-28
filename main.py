@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 from src.ingestion.lightyear import parse_lightyear_pdf, PortfolioSnapshot
 from src.analysis.analyst import analyze_portfolio
 from src.reporting.report import generate_report
+from src.reporting.storage import upload_report
+from src.reporting.email import send_report_email
 from src.database.supabase_client import (
     get_client,
     store_snapshot,
@@ -350,6 +352,28 @@ def run_pipeline(force: bool = False) -> bool:
             portfolio_analysis,
             output_path=REPORTS_DIR / report_filename,
         )
+
+        # --- Upload report to Supabase Storage (public URL for email CTA) ---
+        report_url = None
+        try:
+            report_url = upload_report(report_path)
+            print(f"Report hosted at: {report_url}")
+        except Exception as e:
+            print(f"  Warning: Storage upload failed: {e}")
+
+        # --- Email report ---
+        if os.getenv("GMAIL_ADDRESS") and os.getenv("GMAIL_APP_PASSWORD") and os.getenv("REPORT_EMAIL_TO"):
+            try:
+                send_report_email(
+                    analysis=portfolio_analysis,
+                    report_date=str(snapshot.statement_date),
+                    report_url=report_url,
+                    report_path=report_path,
+                )
+            except Exception as e:
+                print(f"  Warning: Email delivery failed: {e}")
+        else:
+            print("Email not configured (GMAIL_ADDRESS / GMAIL_APP_PASSWORD / REPORT_EMAIL_TO not set)")
 
         # --- Log success ---
         log_run(

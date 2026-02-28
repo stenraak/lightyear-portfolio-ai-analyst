@@ -673,6 +673,153 @@ def _render_position_card(analysis: PositionAnalysis,
 # Portfolio summary section
 # ---------------------------------------------------------------------------
 
+def _render_sizing_bars(sizing_alignment: list[dict]) -> str:
+    if not sizing_alignment:
+        return ""
+    ACTION_COLOR = {"buy": "#22c55e", "hold": "#f59e0b", "sell": "#ef4444"}
+    FLAG_LABELS = {
+        "undersized_high_conviction_buy": "Undersized",
+        "oversized_sell": "Oversized SELL",
+        "oversized_low_conviction": "Oversized low conv.",
+    }
+    rows = ""
+    for s in sizing_alignment:
+        color = ACTION_COLOR.get(s["action"], "#94a3b8")
+        bar_width = min(s["weight_pct"] * 2, 100)
+        flag_html = ""
+        if s.get("flag"):
+            label = FLAG_LABELS.get(s["flag"], s["flag"])
+            flag_html = (
+                f'<span style="font-size:10px;padding:1px 6px;border-radius:8px;'
+                f'background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b55;'
+                f'margin-left:8px;">{label}</span>'
+            )
+        rows += f"""
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+            <span style="width:44px;font-size:12px;color:#94a3b8;flex-shrink:0;">{s['symbol']}</span>
+            <div style="flex:1;background:#0f172a;border-radius:3px;height:10px;">
+                <div style="width:{bar_width:.1f}%;background:{color};border-radius:3px;height:10px;"></div>
+            </div>
+            <span style="width:40px;text-align:right;font-size:12px;color:#64748b;">{s['weight_pct']:.1f}%</span>
+            <span style="font-size:10px;padding:1px 6px;border-radius:8px;
+                background:{color}22;color:{color};border:1px solid {color}55;width:36px;text-align:center;">
+                {s['action'].upper()[:1]}
+            </span>
+            {flag_html}
+        </div>"""
+    return f"""
+    <div style="margin-top:16px;padding-top:16px;border-top:1px solid #334155;">
+        <div class="metric-label" style="margin-bottom:10px;">Position Sizing</div>
+        {rows}
+    </div>"""
+
+
+def _render_beta_drawdown(portfolio_beta: Optional[float], drawdown_scenarios: list[dict]) -> str:
+    if portfolio_beta is None:
+        return ""
+    rows = ""
+    intensities = ["#1e293b", "#1c2333", "#1a1f2e", "#1e1520", "#2d0f0f"]
+    for i, d in enumerate(drawdown_scenarios):
+        bg = intensities[min(i, len(intensities) - 1)]
+        impact_color = "#ef4444" if d["eur_impact"] < 0 else "#22c55e"
+        rows += f"""
+        <tr style="background:{bg};">
+            <td style="padding:5px 10px;font-size:12px;color:#94a3b8;">Market {d['market_pct']:+d}%</td>
+            <td style="padding:5px 10px;font-size:12px;color:{impact_color};text-align:right;">{d['portfolio_pct']:+.1f}%</td>
+            <td style="padding:5px 10px;font-size:12px;color:{impact_color};text-align:right;">€{d['eur_impact']:,.0f}</td>
+        </tr>"""
+    return f"""
+    <div style="margin-top:16px;padding-top:16px;border-top:1px solid #334155;">
+        <div class="metric-label" style="margin-bottom:10px;">
+            Portfolio Beta: <span style="color:#818cf8;">{portfolio_beta:.2f}</span>
+        </div>
+        <table style="width:100%;border-collapse:collapse;border-radius:6px;overflow:hidden;">
+            <thead>
+                <tr style="background:#0f172a;">
+                    <th style="padding:4px 10px;font-size:11px;color:#475569;text-align:left;font-weight:600;">Market Drop</th>
+                    <th style="padding:4px 10px;font-size:11px;color:#475569;text-align:right;font-weight:600;">Portfolio</th>
+                    <th style="padding:4px 10px;font-size:11px;color:#475569;text-align:right;font-weight:600;">EUR Impact</th>
+                </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+        </table>
+    </div>"""
+
+
+def _render_correlation_heatmap(correlation_matrix: dict) -> str:
+    if not correlation_matrix or len(correlation_matrix) < 2:
+        return ""
+    syms = list(correlation_matrix.keys())
+
+    def _cell_color(r: float, is_diag: bool) -> str:
+        if is_diag:
+            return "#6366f1"
+        if abs(r) > 0.75:
+            return "#ef4444"
+        if abs(r) > 0.50:
+            return "#f59e0b"
+        if abs(r) > 0.25:
+            return "#64748b"
+        return "#22c55e"
+
+    n = len(syms)
+    cell_size = max(52, min(80, 400 // n))
+
+    header_cells = f'<div style="width:{cell_size}px;height:{cell_size}px;"></div>'
+    for s in syms:
+        header_cells += (
+            f'<div style="width:{cell_size}px;height:{cell_size}px;display:flex;'
+            f'align-items:center;justify-content:center;font-size:11px;color:#64748b;">{s}</div>'
+        )
+
+    data_rows = ""
+    for s1 in syms:
+        row = (
+            f'<div style="width:{cell_size}px;height:{cell_size}px;display:flex;'
+            f'align-items:center;justify-content:center;font-size:11px;color:#64748b;">{s1}</div>'
+        )
+        for s2 in syms:
+            r = correlation_matrix[s1][s2]
+            is_diag = s1 == s2
+            color = _cell_color(r, is_diag)
+            val_str = "1.0" if is_diag else f"{r:+.2f}"
+            row += (
+                f'<div style="width:{cell_size}px;height:{cell_size}px;background:{color}33;'
+                f'border:1px solid {color}55;display:flex;align-items:center;justify-content:center;'
+                f'font-size:11px;color:{color};font-weight:600;border-radius:4px;">{val_str}</div>'
+            )
+        data_rows += f'<div style="display:flex;gap:3px;margin-bottom:3px;">{row}</div>'
+
+    return f"""
+    <div style="margin-top:16px;padding-top:16px;border-top:1px solid #334155;">
+        <div class="metric-label" style="margin-bottom:10px;">Return Correlation (1yr daily)</div>
+        <div style="overflow-x:auto;">
+            <div style="display:flex;gap:3px;margin-bottom:3px;">{header_cells}</div>
+            {data_rows}
+        </div>
+        <p style="font-size:11px;color:#334155;margin-top:8px;">
+            <span style="color:#ef4444">&#9632;</span> High (&gt;0.75) &nbsp;
+            <span style="color:#f59e0b">&#9632;</span> Mod (0.50&ndash;0.75) &nbsp;
+            <span style="color:#64748b">&#9632;</span> Low (0.25&ndash;0.50) &nbsp;
+            <span style="color:#22c55e">&#9632;</span> Uncorrelated (&lt;0.25)
+        </p>
+    </div>"""
+
+
+def _render_cross_portfolio_news_themes(themes) -> str:
+    """Render cross-portfolio news themes as a bullet list."""
+    if not themes or not isinstance(themes, list):
+        return ""
+    items = "".join(f"<li>{theme}</li>" for theme in themes if theme)
+    if not items:
+        return ""
+    return f"""
+        <div class="metric-label" style="margin-top:12px;">
+            Cross-Portfolio News Themes
+        </div>
+        <ul class="risk-list">{items}</ul>"""
+
+
 def _render_portfolio_summary(
     analysis: PortfolioAnalysis,
 ) -> str:
@@ -736,6 +883,12 @@ def _render_portfolio_summary(
                     — {summary.get("top_risk", {}).get("reason", "")}
                 </p>
             </div>
+            <div>
+                <div class="metric-label">Rebalance Suggestion</div>
+                <p class="metric-summary">
+                    {summary.get("rebalance_suggestion", "")}
+                </p>
+            </div>
         </div>
 
         <div class="rationale-block">
@@ -749,7 +902,12 @@ def _render_portfolio_summary(
             <p class="metric-summary">
                 {summary.get("market_context", "")}
             </p>
+            {_render_cross_portfolio_news_themes(summary.get("cross_portfolio_news_themes", []))}
         </div>
+
+        {_render_sizing_bars(analysis.sizing_alignment)}
+        {_render_beta_drawdown(analysis.portfolio_beta, analysis.drawdown_scenarios)}
+        {_render_correlation_heatmap(analysis.correlation_matrix)}
     </div>"""
 
 

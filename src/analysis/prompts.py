@@ -226,7 +226,7 @@ def build_analysis_prompt(position: Position, market_data: MarketData) -> str:
 
     news_text = "\n".join(
         f"- [{n.published_at}] {n.title} ({n.publisher})"
-        + (f"\n  {n.summary[:250]}" if n.summary else "")
+        + (f"\n  {n.summary[:400]}" if n.summary else "")
         for n in market_data.news
     ) or "No recent news available."
 
@@ -292,27 +292,32 @@ Net Debt (TTM):   {_fmt_signed(net_debt_ttm)}
 Analyze this equity position using the multi-year/quarter data above. You must generate
 BOTH a bull case and a bear case before synthesising a recommendation.
 
+Cross-reference the news headlines explicitly in each dimension below — do not treat news as a standalone section.
+
 - Business quality: Is the moat real and durable? Reference specific margin
   levels and trends from the annual data. What threatens the competitive position?
 - Financial health: Assess the TRAJECTORY — is revenue growth accelerating or
   decelerating? Are margins expanding or compressing? Is FCF growing
   proportionally to revenue? Is debt rising or falling relative to earnings?
   Reference anything relevant from the quarterly data to explain recent inflections or momentum.
+  Does any headline CONFIRM or CONTRADICT the stated revenue/margin trend? Name it explicitly.
 - Valuation: What growth rate does the current multiple imply? Is it realistic
   given the actual trajectory from the data?
   Specifically: if forward P/E is available, compute the implied EPS CAGR needed
   to justify it at a 15x exit multiple over 3 years and state whether the actual
   revenue/earnings trajectory supports that rate.
+  Does any headline suggest a near-term CATALYST (earnings guidance, M&A, product launch) that could re-rate the multiple?
 - Technical analysis: Synthesise RSI zone, MACD direction, moving average
   trend (golden/death cross), Bollinger Band position, and volume ratio into
   an overall technical signal. Do the technicals confirm or contradict the
   fundamental thesis? Call out any divergences explicitly.
-- Risks & news: Specific risks with actual numbers. What are the headlines
-  signalling about near-term momentum or potential risks/opportunities?
+- Risks: Specific risks with actual numbers. Which 1-2 HEADLINES signal the most concrete near-term risks? Name them.
 - Bull case: The most optimistic scenario the data can plausibly support over
   3 years. What goes right? Cite the current baseline and the upside scenario.
+  Are there SPECIFIC HEADLINES supporting this thesis? Reference them by title.
 - Bear case: The realistic downside. What goes wrong, and what would the
   financials look like if it does? Cite specific numbers.
+  Are there SPECIFIC HEADLINES indicating the bear case is already unfolding?
 - Recommendation: Synthesise the bull and bear cases and make a clear call.
   BUY if the valuation is cheap or fair AND the fundamental trajectory supports the bull case.
   SELL if the multiple prices in near-perfect execution AND the bear case is more probable
@@ -340,12 +345,14 @@ Return ONLY this JSON structure:
     "revenue_trend": "<accelerating|stable|decelerating|declining>",
     "margin_trend": "<expanding|stable|compressing>",
     "fcf_quality": "<strong|adequate|weak|negative>",
-    "summary": "<explain revenue/margin/FCF trajectory with YoY numbers>"
+    "summary": "<explain revenue/margin/FCF trajectory with YoY numbers>",
+    "news_crossref": "<headline title that confirms or contradicts the trend, or null>"
   }},
   "valuation": {{
     "score": <1-10>,
     "assessment": "<cheap|fair|expensive|very_expensive>",
-    "summary": "<what growth rate does the current multiple imply? Is it realistic?>"
+    "summary": "<what growth rate does the current multiple imply? Is it realistic?>",
+    "catalyst_headline": "<headline title suggesting a near-term catalyst that could re-rate the multiple, or null>"
   }},
   "risks": {{
     "score": <1-10, where 10 = extreme risk>,
@@ -353,7 +360,8 @@ Return ONLY this JSON structure:
       "<specific risk with data>",
       "<specific risk with data>",
       "<specific risk with data>"
-    ]
+    ],
+    "headline_risks": ["<title of most risk-relevant headline>", "<title of second risk-relevant headline>"]
   }},
   "technical_analysis": {{
     "signal": "<bullish|neutral|bearish>",
@@ -361,7 +369,11 @@ Return ONLY this JSON structure:
   }},
   "news_sentiment": {{
     "sentiment": "<positive|neutral|negative>",
-    "summary": "<1-3 sentences — what story are the headlines telling?>"
+    "summary": "<1-3 sentences — what story are the headlines telling?>",
+    "key_headlines": [
+      {{"title": "<use the exact title text from the ## Recent News Headlines section>", "relevance": "<one sentence on why this headline matters>"}},
+      {{"title": "<exact title>", "relevance": "<relevance>"}}
+    ]
   }},
   "bull_case": {{
     "thesis": "<optimistic 3yr scenario with baseline and upside numbers>",
@@ -369,7 +381,8 @@ Return ONLY this JSON structure:
       "<catalyst with data>",
       "<catalyst with data>",
       "<catalyst with data>"
-    ]
+    ],
+    "supporting_headlines": ["<exact title of headline supporting this thesis>"]
   }},
   "bear_case": {{
     "thesis": "<realistic downside scenario with specific numbers e.g. margin X%→Y%, debt Z×>",
@@ -377,7 +390,8 @@ Return ONLY this JSON structure:
       "<bear risk with data>",
       "<bear risk with data>",
       "<bear risk with data>"
-    ]
+    ],
+    "threatening_headlines": ["<exact title of headline indicating bear case is forming>"]
   }},
   "recommendation": {{
     "action": "<buy|hold|sell>",
@@ -415,7 +429,7 @@ def build_etf_analysis_prompt(position: Position, market_data: MarketData) -> st
 
     news_text = "\n".join(
         f"- [{n.published_at}] {n.title} ({n.publisher})"
-        + (f"\n  {n.summary[:250]}" if n.summary else "")
+        + (f"\n  {n.summary[:400]}" if n.summary else "")
         for n in market_data.news
     ) or "No recent news available."
 
@@ -468,12 +482,17 @@ YTD return:       {ytd}
 Evaluate this ETF on the following dimensions. Generate BOTH a bull and bear
 case before synthesising a recommendation.
 
+Cross-reference the news headlines explicitly in each dimension below — do not treat news as a standalone section.
+
 - Fund quality: Reputable issuer? Competitive expense ratio? AUM sufficient
   for liquidity and closure safety?
 - Thematic exposure: What macro or structural trend does this track? Are
   tailwinds structural or cyclical? Is the theme already priced in?
+  Does any headline CONFIRM or CONTRADICT the stated thematic trend? Name it explicitly.
 - Valuation: Is the sector at a premium or discount to historical range?
+  Does any headline suggest a near-term CATALYST that could re-rate the sector multiple?
 - Risks: Concentration, rate sensitivity, currency, regulatory, fee drag.
+  Which 1-2 HEADLINES signal the most concrete near-term risks? Name them.
 - Technical analysis: Synthesise RSI zone, MACD direction, moving average
   trend, Bollinger Band position, and volume ratio. Does the technical picture
   confirm or contradict the macro/thematic thesis for this ETF?
@@ -481,8 +500,10 @@ case before synthesising a recommendation.
 - Bull case: Describe the scenario where macro tailwinds materialise, AUM
   grows, and the theme delivers above-market returns. What specific conditions
   would need to be true?
+  Are there SPECIFIC HEADLINES supporting this thesis? Reference them by title.
 - Bear case: Describe the scenario where the macro backdrop reverses, the
   theme de-rates, or structural risks materialise. Be specific.
+  Are there SPECIFIC HEADLINES indicating the bear case is already unfolding?
 - Recommendation: Synthesise both cases and make a clear call.
   BUY if macro tailwinds are structural and the sector is at a fair or cheap valuation.
   SELL if the theme is clearly deteriorating or the sector is significantly overvalued
@@ -505,12 +526,14 @@ Return ONLY this JSON structure:
   "thematic_exposure": {{
     "score": <1-10>,
     "theme_strength": "<strong|moderate|weak>",
-    "summary": "<sector/theme, macro tailwinds or headwinds, concentration>"
+    "summary": "<sector/theme, macro tailwinds or headwinds, concentration>",
+    "news_crossref": "<headline title that confirms or contradicts the thematic trend, or null>"
   }},
   "valuation": {{
     "score": <1-10>,
     "assessment": "<cheap|fair|expensive|very_expensive>",
-    "summary": "<whether sector valuation is attractive or stretched>"
+    "summary": "<whether sector valuation is attractive or stretched>",
+    "catalyst_headline": "<headline title suggesting a near-term catalyst that could re-rate the sector, or null>"
   }},
   "risks": {{
     "score": <1-10, where 10 = extreme risk>,
@@ -518,7 +541,8 @@ Return ONLY this JSON structure:
       "<specific risk with data>",
       "<specific risk with data>",
       "<specific risk with data>"
-    ]
+    ],
+    "headline_risks": ["<title of most risk-relevant headline>", "<title of second risk-relevant headline>"]
   }},
   "technical_analysis": {{
     "signal": "<bullish|neutral|bearish>",
@@ -526,7 +550,11 @@ Return ONLY this JSON structure:
   }},
   "news_sentiment": {{
     "sentiment": "<positive|neutral|negative>",
-    "summary": "<1-3 sentences — what story are the headlines telling about the theme?>"
+    "summary": "<1-3 sentences — what story are the headlines telling about the theme?>",
+    "key_headlines": [
+      {{"title": "<use the exact title text from the ## Recent News Headlines section>", "relevance": "<one sentence on why this headline matters>"}},
+      {{"title": "<exact title>", "relevance": "<relevance>"}}
+    ]
   }},
   "bull_case": {{
     "thesis": "<optimistic scenario: macro/structural tailwind that materialises, with upside numbers>",
@@ -534,7 +562,8 @@ Return ONLY this JSON structure:
       "<catalyst with macro/policy/sector data>",
       "<catalyst with macro/policy/sector data>",
       "<catalyst with macro/policy/sector data>"
-    ]
+    ],
+    "supporting_headlines": ["<exact title of headline supporting this thesis>"]
   }},
   "bear_case": {{
     "thesis": "<downside scenario: macro reversal or structural risk, with specific conditions>",
@@ -542,7 +571,8 @@ Return ONLY this JSON structure:
       "<bear risk with macro/regulation/sector data>",
       "<bear risk with macro/regulation/sector data>",
       "<bear risk with macro/regulation/sector data>"
-    ]
+    ],
+    "threatening_headlines": ["<exact title of headline indicating bear case is forming>"]
   }},
   "recommendation": {{
     "action": "<buy|hold|sell>",
@@ -572,6 +602,11 @@ Return ONLY this JSON structure:
 def build_portfolio_summary_prompt(
     positions_analyses: list[dict],
     total_value_eur: float,
+    market_data: Optional[dict] = None,
+    sizing_alignment: list[dict] = [],
+    portfolio_beta: Optional[float] = None,
+    drawdown_scenarios: list[dict] = [],
+    correlation_matrix: dict = {},
 ) -> str:
     """Portfolio-level summary after individual analyses."""
 
@@ -607,10 +642,74 @@ def build_portfolio_summary_prompt(
 
     analyses_text = "\n\n".join(_position_summary(a) for a in positions_analyses)
 
+    # Build compact news highlights block (top 2 headlines per position)
+    news_highlights = ""
+    if market_data:
+        highlights_lines = []
+        for a in positions_analyses:
+            sym = a.get("symbol", "")
+            md = market_data.get(sym)
+            if md and hasattr(md, "news") and md.news:
+                highlights_lines.append(f"\n### {sym}")
+                for n in md.news[:2]:
+                    highlights_lines.append(
+                        f"- [{n.published_at}] {n.title} ({n.publisher})"
+                        + (f"\n  {n.summary[:200]}" if n.summary else "")
+                    )
+        if highlights_lines:
+            news_highlights = "\n## News Highlights\n" + "\n".join(highlights_lines)
+
+    # Sizing alignment block
+    sizing_text = ""
+    if sizing_alignment:
+        lines = [f"{'Symbol':<8} {'Weight':>7}  {'Action':<10} {'Conviction':<10} Note"]
+        lines.append("-" * 58)
+        for s in sizing_alignment:
+            flag_str = f"  *** {s['flag']}" if s["flag"] else ""
+            lines.append(
+                f"{s['symbol']:<8} {s['weight_pct']:>6.1f}%  "
+                f"{s['action'].upper():<10} {s['conviction'].upper():<10}{flag_str}"
+            )
+        sizing_text = "\n## Position Sizing vs Conviction\n" + "\n".join(lines)
+
+    # Beta/drawdown block
+    beta_text = ""
+    if portfolio_beta is not None:
+        lines = [f"Portfolio weighted beta: {portfolio_beta:.2f}"]
+        lines.append("Drawdown scenarios (beta-adjusted):")
+        for d in drawdown_scenarios:
+            lines.append(
+                f"  Market {d['market_pct']:+d}% → Portfolio {d['portfolio_pct']:+.1f}%"
+                f"  (€{d['eur_impact']:,.0f})"
+            )
+        beta_text = "\n## Portfolio Beta & Drawdown\n" + "\n".join(lines)
+
+    # Correlation highlights (top pairs by |r|)
+    corr_text = ""
+    if correlation_matrix:
+        syms = list(correlation_matrix.keys())
+        pairs = [
+            (s1, s2, correlation_matrix[s1][s2])
+            for i, s1 in enumerate(syms) for s2 in syms[i + 1:]
+        ]
+        pairs.sort(key=lambda x: abs(x[2]), reverse=True)
+        lines = ["Pairwise 1-year return correlations (highest first):"]
+        for s1, s2, r in pairs[:6]:
+            label = "HIGH" if abs(r) > 0.75 else "MOD" if abs(r) > 0.50 else "LOW"
+            lines.append(f"  {s1}↔{s2}: {r:+.2f}  [{label}]")
+        corr_text = "\n## Correlation Highlights\n" + "\n".join(lines)
+
     return f"""## Portfolio Total Value: €{total_value_eur:,.2f}
 
 ## Individual Position Summaries
 {analyses_text}
+{news_highlights}
+{sizing_text}
+{beta_text}
+{corr_text}
+
+Use the Sizing, Beta, and Correlation data above when writing concentration_risk
+and rebalance_suggestion — reference specific symbols and numbers.
 
 Return ONLY this JSON structure:
 {{
@@ -627,5 +726,9 @@ Return ONLY this JSON structure:
   }},
   "portfolio_action": "<2 sentences — what should the investor actually do?>",
   "market_context": "<3-5 sentences. Cover: (1) Current macro regime — where are interest rates, growth trajectory, and inflation headed right now? (2) How do these conditions specifically affect the SECTORS held in this portfolio — name each major sector and explain WHY it is favored or disfavored under the current regime (e.g. 'Semiconductors benefit from AI capex because... however rate sensitivity means...'). (3) The single biggest macro risk that could materially hurt this specific portfolio and the mechanism by which it would do so.>",
-  "rebalance_suggestion": "<1-2 sentences — should any position be trimmed or sized up given current valuations and conviction levels? Reference specific symbols>"
+  "rebalance_suggestion": "<1-2 sentences — should any position be trimmed or sized up given current valuations and conviction levels? Reference specific symbols>",
+  "cross_portfolio_news_themes": [
+    "<cross-position news theme that affects multiple holdings>",
+    "<cross-position news theme that affects multiple holdings>"
+  ]
 }}"""

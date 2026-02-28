@@ -1,3 +1,9 @@
+# Project-specific — never commit real financial data or local tooling state
+data/
+reports/
+notebooks/
+.claude/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

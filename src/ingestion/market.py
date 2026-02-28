@@ -5,6 +5,7 @@ quarterly/annual financial trends for each position in the portfolio.
 """
 
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -179,6 +180,7 @@ class MarketData(BaseModel):
     annual: list[AnnualSnapshot] = Field(default_factory=list)
     news: list[NewsItem] = Field(default_factory=list)
     technicals: Optional[TechnicalIndicators] = None
+    price_history: list[float] = Field(default_factory=list)  # daily closes, 1yr, oldest→newest
     fetch_error: Optional[str] = None
 
 
@@ -441,20 +443,90 @@ def _parse_finnhub_news(items: list) -> list[NewsItem]:
     return news_items
 
 
-def _fetch_news_finnhub(symbol: str, asset_type: str) -> list[NewsItem]:
+def _normalize_title(title: str) -> str:
+    """Lowercase and strip non-alphanumeric characters for deduplication."""
+    return re.sub(r"[^a-z0-9]", "", title.lower())
+
+
+def _deduplicate_news(items: list[NewsItem]) -> list[NewsItem]:
+    """Drop near-duplicate headlines by normalized title key."""
+    seen: set[str] = set()
+    result = []
+    for item in items:
+        key = _normalize_title(item.title)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result
+
+
+def _extract_news(ticker: yf.Ticker, max_items: int = 15) -> list[NewsItem]:
+    """
+    Extract news from yfinance, handling both old flat format and new
+    {'content': {...}} wrapper introduced in yfinance 0.2.50+.
+    """
+    try:
+        raw_news = ticker.news or []
+        items = []
+        for item in raw_news[:max_items]:
+            try:
+                content = item.get("content")
+                if isinstance(content, dict):
+                    # New format (yfinance 0.2.50+)
+                    title = content.get("title", "")
+                    publisher = (content.get("provider") or {}).get("displayName", "")
+                    link = (content.get("canonicalUrl") or {}).get("url", "")
+                    pub_date_raw = content.get("pubDate", "")
+                    published_at = pub_date_raw[:10] if pub_date_raw else ""
+                    summary = content.get("summary", "")
+                else:
+                    # Old flat format
+                    title = item.get("title", "")
+                    publisher = item.get("publisher", "")
+                    link = item.get("link", "")
+                    ts = item.get("providerPublishTime")
+                    published_at = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else ""
+                    summary = item.get("summary", "")
+                if title:
+                    items.append(NewsItem(
+                        title=title,
+                        publisher=publisher,
+                        link=link,
+                        published_at=published_at,
+                        summary=summary,
+                    ))
+            except Exception:
+                continue
+        return items
+    except Exception as e:
+        print(f"  Warning: yfinance news extraction failed: {e}")
+        return []
+
+
+def _fetch_news_finnhub(
+    symbol: str,
+    asset_type: str,
+    ticker: Optional[yf.Ticker] = None,
+) -> list[NewsItem]:
     """
     Fetch news via Finnhub API.
-    - Equities: company-specific news for the past 14 days.
-    - ETFs: general financial news filtered by thematic keywords.
+    - Equities: company-specific news for the past 30 days, up to 15 items.
+      Falls back to yfinance if Finnhub returns < 3 items.
+    - ETFs: general financial news filtered by thematic keywords (no yfinance fallback).
     """
     try:
         client = _get_finnhub_client()
         today = datetime.now().strftime("%Y-%m-%d")
-        from_date = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+        from_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
         if asset_type == "EQUITY":
             raw = client.company_news(symbol, _from=from_date, to=today)
-            return _parse_finnhub_news(raw[:10])
+            items = _parse_finnhub_news(raw[:15])
+            # Supplement with yfinance if Finnhub is sparse
+            if len(items) < 3 and ticker is not None:
+                yf_items = _extract_news(ticker, max_items=15)
+                items = items + yf_items
+            return _deduplicate_news(items)
         else:
             # ETF: filter general financial news by thematic keywords
             keywords = ETF_NEWS_THEMES.get(symbol, [])
@@ -470,10 +542,23 @@ def _fetch_news_finnhub(symbol: str, asset_type: str) -> list[NewsItem]:
                     for kw in keywords
                 )
             ]
-            return _parse_finnhub_news(filtered[:10])
+            items = _parse_finnhub_news(filtered[:15])
+            return _deduplicate_news(items)
 
     except Exception as e:
         print(f"  Warning: Finnhub news fetch failed for {symbol}: {e}")
+        return []
+
+
+def _extract_price_history(ticker: yf.Ticker) -> list[float]:
+    """Extract 1-year daily close prices for portfolio correlation computation.
+    yfinance caches history() per Ticker object — no double-fetch."""
+    try:
+        hist = ticker.history(period="1y")
+        if hist.empty:
+            return []
+        return hist["Close"].dropna().tolist()
+    except Exception:
         return []
 
 
@@ -633,8 +718,9 @@ def fetch_market_data(symbol: str) -> MarketData:
             quarterly = _extract_quarterly_financials(ticker)
             annual = _extract_annual_financials(ticker)
 
-        news = _fetch_news_finnhub(symbol, asset_type)
+        news = _fetch_news_finnhub(symbol, asset_type, ticker=ticker)
         technicals = _compute_technicals(ticker, symbol)
+        price_history = _extract_price_history(ticker)
 
         return MarketData(
             symbol=symbol,
@@ -651,6 +737,7 @@ def fetch_market_data(symbol: str) -> MarketData:
             annual=annual,
             news=news,
             technicals=technicals,
+            price_history=price_history,
         )
 
     except Exception as e:
