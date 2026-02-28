@@ -1,8 +1,8 @@
 # Lightyear Portfolio AI Analyst
 
-An automated AI-powered investment portfolio analyst for personal [Lightyear](https://lightyear.com) brokerage accounts. Parses PDF statements, fetches multi-source market data, runs structured LLM analysis across three analytical lenses (fundamentals, technicals, news sentiment), generates HTML reports, and tracks recommendation performance over time.
+An automated AI-powered investment portfolio analyst for personal [Lightyear](https://lightyear.com) brokerage accounts. Parses PDF statements, fetches multi-source market data, runs structured LLM analysis across three analytical lenses (fundamentals, technicals, news sentiment), computes portfolio-level risk metrics, generates HTML reports, emails a summary, and tracks recommendation performance over time.
 
-Runs on a 5-day schedule via Railway cron.
+Runs on a 5-day schedule via GitHub Actions (free).
 
 ---
 
@@ -10,17 +10,22 @@ Runs on a 5-day schedule via Railway cron.
 
 1. **Parses Lightyear PDF statements** — extracts positions, quantities, values, and statement date via `pdfplumber`
 2. **Fetches market data** from two sources:
-   - **yfinance** — price, valuation metrics, 4 quarters + 4 years of financials
+   - **yfinance** — price, valuation metrics, 4 quarters + 4 years of financials, 1-year daily price history
    - **Finnhub** — company news with article summaries (equities); theme-filtered general news (ETFs)
 3. **Computes technical indicators** in pure pandas — RSI(14), MACD(12,26,9), SMA(50/200), Bollinger Bands(20,2σ), volume ratio, 52-week range
 4. **Runs LLM analysis** per position across three lenses:
    - Fundamentals (business quality, financial health, valuation, bull/bear case)
    - Technical analysis (trend regime, momentum, mean-reversion signals)
    - News sentiment (Finnhub article summaries synthesised into a directional signal)
-5. **Generates a self-contained HTML report** with per-position cards and a portfolio-level summary
-6. **Stores everything in Supabase** — snapshots, positions, analyses, and run logs
-7. **Tracks sold positions** — detects when a position disappears from the PDF, records exit price from yfinance, and computes post-sale returns at 30d / 90d / 180d to evaluate recommendation quality (premature / correct / neutral)
-8. **Updates historical recommendation prices** — tracks price at time of recommendation for ongoing calibration
+5. **Computes portfolio-level risk metrics:**
+   - Pairwise 1-year return correlation matrix
+   - Position sizing vs conviction alignment (flags undersized/oversized positions)
+   - Weighted portfolio beta + drawdown scenarios at −10/15/20/30/50%
+6. **Generates a self-contained HTML report** with per-position cards and a portfolio-level summary including sizing bars, beta/drawdown table, and correlation heatmap
+7. **Uploads the report** to Supabase Storage and emails an Outlook-safe summary with a "View Full Report" link
+8. **Stores everything in Supabase** — snapshots, positions, analyses, and run logs
+9. **Tracks sold positions** — detects when a position disappears from the PDF, records exit price from yfinance, and computes post-sale returns at 30d / 90d / 180d to evaluate recommendation quality (premature / correct / neutral)
+10. **Updates historical recommendation prices** — tracks price at time of recommendation for ongoing calibration
 
 ---
 
@@ -44,7 +49,7 @@ Each position is evaluated independently with separate prompt schemas for equiti
 - Technical analysis: price trend, momentum, volume (same indicator set as equities)
 - News sentiment: general financial news filtered by ETF theme keywords
 
-**Portfolio summary** — cross-position synthesis covering concentration risk, top opportunity, top risk, market context, and rebalancing suggestions.
+**Portfolio summary** — cross-position synthesis covering concentration risk, top opportunity, top risk, market context, rebalancing suggestions, sizing/beta/correlation data fed to the LLM so it references specific symbols and numbers.
 
 ---
 
@@ -60,7 +65,8 @@ Each position is evaluated independently with separate prompt schemas for equiti
 | LLM — production | Anthropic Claude API |
 | LLM — development | Groq (Llama) |
 | Database & storage | Supabase (PostgreSQL + file storage) |
-| Deployment | Railway (5-day cron) |
+| Email delivery | Gmail SMTP (stdlib `smtplib`, no extra package) |
+| Deployment | GitHub Actions (5-day cron, free) |
 
 ---
 
@@ -71,14 +77,19 @@ main.py                        # Pipeline entry point, sold position tracking
 src/
 ├── ingestion/
 │   ├── lightyear.py           # PDF parser → PortfolioSnapshot
-│   └── market.py              # yfinance + Finnhub + technical indicators
+│   └── market.py              # yfinance + Finnhub + technical indicators + price history
 ├── analysis/
-│   ├── prompts.py             # Equity and ETF prompt builders + JSON schemas
-│   └── analyst.py            # LLM orchestration, provider abstraction
+│   ├── prompts.py             # Equity and ETF prompt builders + portfolio summary prompt
+│   └── analyst.py            # LLM orchestration, portfolio-level risk computations
 ├── database/
 │   └── supabase_client.py     # All DB operations (snapshots, analyses, tracking)
 └── reporting/
-    └── report.py              # Self-contained HTML report generator
+    ├── report.py              # Self-contained HTML report generator
+    ├── storage.py             # Supabase Storage upload → public URL
+    └── email.py               # Outlook-safe summary email via Gmail SMTP
+.github/
+└── workflows/
+    └── analyst.yml            # GitHub Actions schedule + manual trigger
 ```
 
 ---
@@ -98,15 +109,22 @@ uv sync
 Copy `.env.example` to `.env` and fill in:
 
 ```env
-SUPABASE_URL=
-SUPABASE_KEY=
-ANTHROPIC_API_KEY=
-GROQ_API_KEY=
-FINNHUB_API_KEY=
-LLM_PROVIDER=groq          # or: anthropic
+SUPABASE_URL=your_supabase_url
+SUPABASE_KEY=your_supabase_anon_key
+ANTHROPIC_API_KEY=your_anthropic_key
+GROQ_API_KEY=your_groq_api_key
+FINNHUB_API_KEY=your_finnhub_api_key
+LLM_PROVIDER=groq              # or: anthropic
+
+# Email delivery (optional — skip to disable)
+GMAIL_ADDRESS=your.address@gmail.com
+GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
+REPORT_EMAIL_TO=recipient@example.com
 ```
 
 Get a free Finnhub API key at [finnhub.io](https://finnhub.io) (60 req/min, no daily cap).
+
+For `GMAIL_APP_PASSWORD`: enable 2-Step Verification on your Google account, then go to **myaccount.google.com → Security → App Passwords** and generate a password for "Mail". Copy the 16-character code.
 
 ### 3. Supabase schema
 
@@ -180,13 +198,20 @@ create table run_logs (
 );
 ```
 
-### 4. Upload a PDF
+### 4. Supabase Storage buckets
 
-Upload your Lightyear account statement PDF to a Supabase Storage bucket named `portfolio-pdfs`, or place it in `data/exports/`.
+Create two buckets in **Supabase → Storage**:
 
-### 5. Run
+| Bucket name | Public |
+|---|---|
+| `portfolio-pdfs` | No — private, PDFs are sensitive |
+| `reports` | **Yes** — public URL needed for email link |
+
+### 5. Run locally
 
 ```bash
+# Place a Lightyear PDF in data/exports/ or upload to Supabase Storage portfolio-pdfs bucket
+
 # Normal run (skips if < 5 days since last run)
 uv run python main.py
 
@@ -194,7 +219,48 @@ uv run python main.py
 uv run python main.py --force
 ```
 
-The report is saved to `reports/report_<date>_<time>.html`.
+The report is saved to `reports/report_<date>_<time>.html`, uploaded to Supabase Storage, and emailed if `GMAIL_*` env vars are set.
+
+---
+
+## Deployment (GitHub Actions)
+
+The workflow in `.github/workflows/analyst.yml` runs automatically on days 1, 6, 11, 16, 21, 26 of each month and can be triggered manually from the GitHub Actions UI.
+
+### Add secrets to GitHub
+
+Go to your repo → **Settings → Secrets and variables → Actions** and add:
+
+| Secret | Where to get it |
+|---|---|
+| `SUPABASE_URL` | Supabase → Project Settings → API |
+| `SUPABASE_KEY` | Supabase → Project Settings → API (anon key) |
+| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com) |
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) |
+| `LLM_PROVIDER` | `groq` or `anthropic` |
+| `FINNHUB_API_KEY` | [finnhub.io](https://finnhub.io) |
+| `GMAIL_ADDRESS` | Your Gmail address |
+| `GMAIL_APP_PASSWORD` | 16-char app password (see Setup step 2) |
+| `REPORT_EMAIL_TO` | Where to send the report |
+
+### PDF workflow
+
+Upload your Lightyear statement PDF to the `portfolio-pdfs` Supabase Storage bucket before (or at the time of) each run. The pipeline downloads it automatically — no local files needed on the runner.
+
+### Manual trigger
+
+GitHub → Actions → Portfolio Analysis → **Run workflow**
+
+---
+
+## Email
+
+The pipeline sends two things per run:
+
+1. **Email body** — an Outlook-safe summary (table-based layout, light theme, inline styles). Renders correctly in Outlook for Windows, Outlook on the web, Gmail, and Apple Mail. Contains: position table, portfolio stats, top opportunity/risk, portfolio action, and a "View Full Report" button.
+2. **Attachment** — the full `report.html` file. Open in any browser for the complete dark-theme report with sizing bars, beta/drawdown table, and correlation heatmap.
+
+Email is skipped silently if `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`, and `REPORT_EMAIL_TO` are not set.
 
 ---
 
