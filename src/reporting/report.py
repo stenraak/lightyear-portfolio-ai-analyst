@@ -54,12 +54,6 @@ def _score_bar(score: int, invert: bool = False) -> str:
         </div>"""
 
 
-def _fmt_optional(val, suffix="") -> str:
-    if val is None:
-        return "<span style='color:#475569'>N/A</span>"
-    return f"{val:.2f}{suffix}"
-
-
 def _render_bullet_list(items) -> str:
     """Render key_upsides / key_downsides as a bullet list.
     Accepts either a list of strings (new schema) or a plain string (fallback).
@@ -401,6 +395,30 @@ def _render_recommendation_block(raw: dict) -> str:
         </div>"""
 
 
+def _render_bull_bear_section(raw: dict) -> str:
+    bull = raw.get("bull_case", {})
+    bear = raw.get("bear_case", {})
+    if not bull and not bear:
+        return ""
+    bull_catalysts = "".join(f"<li>{c}</li>" for c in bull.get("catalysts", []))
+    bear_risks = "".join(f"<li>{r}</li>" for r in bear.get("risks", []))
+    return f"""
+        <div style="margin-top:16px;padding-top:16px;border-top:1px solid #334155;">
+            <div class="updown-grid">
+                <div>
+                    <div class="metric-label" style="color:#22c55e;">▲ Bull Case</div>
+                    <p class="metric-summary" style="margin-bottom:6px;">{bull.get("thesis", "")}</p>
+                    <ul class="risk-list">{bull_catalysts}</ul>
+                </div>
+                <div>
+                    <div class="metric-label" style="color:#ef4444;">▼ Bear Case</div>
+                    <p class="metric-summary" style="margin-bottom:6px;">{bear.get("thesis", "")}</p>
+                    <ul class="risk-list">{bear_risks}</ul>
+                </div>
+            </div>
+        </div>"""
+
+
 # ---------------------------------------------------------------------------
 # Equity card body
 # ---------------------------------------------------------------------------
@@ -429,28 +447,7 @@ def _render_equity_body(analysis: PositionAnalysis,
     tech = raw.get("technical_analysis", {})
     tech_signal_color = _signal_color(tech.get("signal", "neutral"))
 
-    bull = raw.get("bull_case", {})
-    bear = raw.get("bear_case", {})
-    bull_catalysts = "".join(f"<li>{c}</li>" for c in bull.get("catalysts", []))
-    bear_risks = "".join(f"<li>{r}</li>" for r in bear.get("risks", []))
-
-    bull_bear_section = ""
-    if bull or bear:
-        bull_bear_section = f"""
-        <div style="margin-top:16px;padding-top:16px;border-top:1px solid #334155;">
-            <div class="updown-grid">
-                <div>
-                    <div class="metric-label" style="color:#22c55e;">▲ Bull Case</div>
-                    <p class="metric-summary" style="margin-bottom:6px;">{bull.get("thesis", "")}</p>
-                    <ul class="risk-list">{bull_catalysts}</ul>
-                </div>
-                <div>
-                    <div class="metric-label" style="color:#ef4444;">▼ Bear Case</div>
-                    <p class="metric-summary" style="margin-bottom:6px;">{bear.get("thesis", "")}</p>
-                    <ul class="risk-list">{bear_risks}</ul>
-                </div>
-            </div>
-        </div>"""
+    bull_bear_section = _render_bull_bear_section(raw)
 
     growth_section = ""
     if growth:
@@ -558,29 +555,6 @@ def _render_etf_body(analysis: PositionAnalysis,
     tech = raw.get("technical_analysis", {})
     tech_signal_color = _signal_color(tech.get("signal", "neutral"))
 
-    bull = raw.get("bull_case", {})
-    bear = raw.get("bear_case", {})
-    bull_catalysts = "".join(f"<li>{c}</li>" for c in bull.get("catalysts", []))
-    bear_risks = "".join(f"<li>{r}</li>" for r in bear.get("risks", []))
-
-    bull_bear_section = ""
-    if bull or bear:
-        bull_bear_section = f"""
-        <div style="margin-top:16px;padding-top:16px;border-top:1px solid #334155;">
-            <div class="updown-grid">
-                <div>
-                    <div class="metric-label" style="color:#22c55e;">▲ Bull Case</div>
-                    <p class="metric-summary" style="margin-bottom:6px;">{bull.get("thesis", "")}</p>
-                    <ul class="risk-list">{bull_catalysts}</ul>
-                </div>
-                <div>
-                    <div class="metric-label" style="color:#ef4444;">▼ Bear Case</div>
-                    <p class="metric-summary" style="margin-bottom:6px;">{bear.get("thesis", "")}</p>
-                    <ul class="risk-list">{bear_risks}</ul>
-                </div>
-            </div>
-        </div>"""
-
     return f"""
         <div style="display:flex;gap:6px;margin:6px 0;flex-wrap:wrap;">
             <span style="font-size:11px;padding:2px 8px;border-radius:10px;
@@ -636,7 +610,7 @@ def _render_etf_body(analysis: PositionAnalysis,
             </div>
         </div>
 
-        {bull_bear_section}
+        {_render_bull_bear_section(raw)}
 
         {_render_recommendation_block(raw)}"""
 

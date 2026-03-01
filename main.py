@@ -22,7 +22,6 @@ from dotenv import load_dotenv
 from src.ingestion.lightyear import parse_lightyear_pdf, PortfolioSnapshot
 from src.analysis.analyst import analyze_portfolio
 from src.reporting.report import generate_report
-from src.reporting.storage import upload_report
 from src.reporting.email import send_report_email
 from src.database.supabase_client import (
     get_client,
@@ -31,6 +30,7 @@ from src.database.supabase_client import (
     should_run,
     log_run,
     update_recommendation_prices,
+    upload_report,
 )
 
 load_dotenv()
@@ -353,11 +353,10 @@ def run_pipeline(force: bool = False) -> bool:
             output_path=REPORTS_DIR / report_filename,
         )
 
-        # --- Upload report to Supabase Storage (public URL for email CTA) ---
-        report_url = None
+        # --- Upload report to Supabase Storage (archival) ---
         try:
             report_url = upload_report(report_path)
-            print(f"Report hosted at: {report_url}")
+            print(f"Report archived at: {report_url}")
         except Exception as e:
             print(f"  Warning: Storage upload failed: {e}")
 
@@ -367,7 +366,6 @@ def run_pipeline(force: bool = False) -> bool:
                 send_report_email(
                     analysis=portfolio_analysis,
                     report_date=str(snapshot.statement_date),
-                    report_url=report_url,
                     report_path=report_path,
                 )
             except Exception as e:

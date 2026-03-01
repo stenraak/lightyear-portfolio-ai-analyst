@@ -5,7 +5,7 @@ Extracts portfolio holdings from the Portfolio breakdown section.
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pdfplumber
@@ -50,7 +50,6 @@ def _parse_statement_date(text: str) -> date:
     pattern = r"For the period of .+ - (\d{1,2} \w+ \d{4})"
     match = re.search(pattern, text)
     if match:
-        from datetime import datetime
         return datetime.strptime(match.group(1), "%d %B %Y").date()
     raise ValueError("Could not parse statement date from PDF")
 

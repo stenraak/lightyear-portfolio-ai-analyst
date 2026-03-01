@@ -2,7 +2,7 @@
 
 An automated AI-powered investment portfolio analyst for personal [Lightyear](https://lightyear.com) brokerage accounts. Parses PDF statements, fetches multi-source market data, runs structured LLM analysis across three analytical lenses (fundamentals, technicals, news sentiment), computes portfolio-level risk metrics, generates HTML reports, emails a summary, and tracks recommendation performance over time.
 
-Runs on a 5-day schedule via GitHub Actions (free).
+Runs every Saturday via GitHub Actions (free).
 
 ---
 
@@ -22,7 +22,7 @@ Runs on a 5-day schedule via GitHub Actions (free).
    - Position sizing vs conviction alignment (flags undersized/oversized positions)
    - Weighted portfolio beta + drawdown scenarios at −10/15/20/30/50%
 6. **Generates a self-contained HTML report** with per-position cards and a portfolio-level summary including sizing bars, beta/drawdown table, and correlation heatmap
-7. **Uploads the report** to Supabase Storage and emails an Outlook-safe summary with a "View Full Report" link
+7. **Emails an Outlook-safe summary** with the full HTML report attached — open the attachment in any browser for the complete interactive report. The report is also archived to Supabase Storage.
 8. **Stores everything in Supabase** — snapshots, positions, analyses, and run logs
 9. **Tracks sold positions** — detects when a position disappears from the PDF, records exit price from yfinance, and computes post-sale returns at 30d / 90d / 180d to evaluate recommendation quality (premature / correct / neutral)
 10. **Updates historical recommendation prices** — tracks price at time of recommendation for ongoing calibration
@@ -66,7 +66,7 @@ Each position is evaluated independently with separate prompt schemas for equiti
 | LLM — development | Groq (Llama) |
 | Database & storage | Supabase (PostgreSQL + file storage) |
 | Email delivery | Gmail SMTP (stdlib `smtplib`, no extra package) |
-| Deployment | GitHub Actions (5-day cron, free) |
+| Deployment | GitHub Actions (weekly Saturday cron, free) |
 
 ---
 
@@ -82,10 +82,9 @@ src/
 │   ├── prompts.py             # Equity and ETF prompt builders + portfolio summary prompt
 │   └── analyst.py            # LLM orchestration, portfolio-level risk computations
 ├── database/
-│   └── supabase_client.py     # All DB operations (snapshots, analyses, tracking)
+│   └── supabase_client.py     # All DB + Storage operations (snapshots, analyses, tracking, archival)
 └── reporting/
     ├── report.py              # Self-contained HTML report generator
-    ├── storage.py             # Supabase Storage upload → public URL
     └── email.py               # Outlook-safe summary email via Gmail SMTP
 .github/
 └── workflows/
@@ -205,7 +204,7 @@ Create two buckets in **Supabase → Storage**:
 | Bucket name | Public |
 |---|---|
 | `portfolio-pdfs` | No — private, PDFs are sensitive |
-| `reports` | **Yes** — public URL needed for email link |
+| `reports` | **Yes** — public, used for report archival |
 
 ### 5. Run locally
 
@@ -225,7 +224,7 @@ The report is saved to `reports/report_<date>_<time>.html`, uploaded to Supabase
 
 ## Deployment (GitHub Actions)
 
-The workflow in `.github/workflows/analyst.yml` runs automatically on days 1, 6, 11, 16, 21, 26 of each month and can be triggered manually from the GitHub Actions UI.
+The workflow in `.github/workflows/analyst.yml` runs automatically every Saturday at 08:00 UTC and can be triggered manually from the GitHub Actions UI.
 
 ### Add secrets to GitHub
 
@@ -235,6 +234,7 @@ Go to your repo → **Settings → Secrets and variables → Actions** and add:
 |---|---|
 | `SUPABASE_URL` | Supabase → Project Settings → API |
 | `SUPABASE_KEY` | Supabase → Project Settings → API (anon key) |
+| `SUPABASE_SERVICE_KEY` | Supabase → Project Settings → API (service_role key) |
 | `GROQ_API_KEY` | [console.groq.com](https://console.groq.com) |
 | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) |
 | `LLM_PROVIDER` | `groq` or `anthropic` |
@@ -257,7 +257,7 @@ GitHub → Actions → Portfolio Analysis → **Run workflow**
 
 The pipeline sends two things per run:
 
-1. **Email body** — an Outlook-safe summary (table-based layout, light theme, inline styles). Renders correctly in Outlook for Windows, Outlook on the web, Gmail, and Apple Mail. Contains: position table, portfolio stats, top opportunity/risk, portfolio action, and a "View Full Report" button.
+1. **Email body** — an Outlook-safe summary (table-based layout, light theme, inline styles). Renders correctly in Outlook for Windows, Outlook on the web, Gmail, and Apple Mail. Contains: position table, portfolio stats, top opportunity/risk, and portfolio action.
 2. **Attachment** — the full `report.html` file. Open in any browser for the complete dark-theme report with sizing bars, beta/drawdown table, and correlation heatmap.
 
 Email is skipped silently if `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`, and `REPORT_EMAIL_TO` are not set.

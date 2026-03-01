@@ -4,6 +4,7 @@ Supabase client for storing portfolio snapshots, analyses and run logs.
 
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -151,8 +152,7 @@ def store_analysis(
 # Run trigger logic
 # ---------------------------------------------------------------------------
 
-def get_last_run_date() -> Optional[datetime]:
-    """Return datetime of last successful analysis run, or None."""
+def _get_last_run_date() -> Optional[datetime]:
     client = get_client()
     try:
         result = client.table("run_log") \
@@ -161,7 +161,6 @@ def get_last_run_date() -> Optional[datetime]:
             .order("ran_at", desc=True) \
             .limit(1) \
             .execute()
-
         if result.data:
             return datetime.fromisoformat(result.data[0]["ran_at"]) # type: ignore
         return None
@@ -171,7 +170,7 @@ def get_last_run_date() -> Optional[datetime]:
 
 def should_run(interval_days: int = 5) -> bool:
     """Return True if enough time has passed since last run."""
-    last_run = get_last_run_date()
+    last_run = _get_last_run_date()
     if last_run is None:
         return True
     if last_run.tzinfo is None:
@@ -296,3 +295,30 @@ def update_recommendation_prices() -> None:
 
     except Exception as e:
         print(f"Warning: Could not update recommendation prices: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Report storage
+# ---------------------------------------------------------------------------
+
+_REPORTS_BUCKET = "reports"
+
+
+def upload_report(report_path: Path) -> str:
+    """
+    Upload an HTML report to Supabase Storage for archival.
+    Returns the public URL. Overwrites any existing file with the same name.
+    """
+    client = get_client()
+    filename = report_path.name
+    html_bytes = report_path.read_bytes()
+    try:
+        client.storage.from_(_REPORTS_BUCKET).remove([filename])
+    except Exception:
+        pass
+    client.storage.from_(_REPORTS_BUCKET).upload(
+        path=filename,
+        file=html_bytes,
+        file_options={"content-type": "text/html; charset=utf-8"},
+    )
+    return client.storage.from_(_REPORTS_BUCKET).get_public_url(filename)

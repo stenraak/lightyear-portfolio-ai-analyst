@@ -62,12 +62,6 @@ def _trend_arrow(values: list[Optional[float]]) -> str:
     return "→"
 
 
-def _fmt_optional(val) -> str:
-    if val is None:
-        return "N/A"
-    return str(val)
-
-
 def _build_quarterly_section(quarterly: list[QuarterlySnapshot]) -> str:
     """Format quarterly financials as a readable trend table."""
     if not quarterly:

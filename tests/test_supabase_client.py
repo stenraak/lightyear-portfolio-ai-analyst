@@ -6,21 +6,21 @@ from datetime import datetime, timedelta, timezone, date
 
 
 def test_should_run_no_previous_runs():
-    with patch("src.database.supabase_client.get_last_run_date",
+    with patch("src.database.supabase_client._get_last_run_date",
                return_value=None):
         assert should_run() is True
 
 
 def test_should_run_recent_run():
     recent = datetime.now(tz=timezone.utc) - timedelta(days=2)
-    with patch("src.database.supabase_client.get_last_run_date",
+    with patch("src.database.supabase_client._get_last_run_date",
                return_value=recent):
         assert should_run(interval_days=5) is False
 
 
 def test_should_run_old_enough():
     old = datetime.now(tz=timezone.utc) - timedelta(days=6)
-    with patch("src.database.supabase_client.get_last_run_date",
+    with patch("src.database.supabase_client._get_last_run_date",
                return_value=old):
         assert should_run(interval_days=5) is True
 

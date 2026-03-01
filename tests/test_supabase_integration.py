@@ -10,7 +10,6 @@ from datetime import date, datetime, timedelta
 from src.database.supabase_client import (
     get_client,
     store_snapshot,
-    get_last_run_date,
     should_run,
     log_run,
 )

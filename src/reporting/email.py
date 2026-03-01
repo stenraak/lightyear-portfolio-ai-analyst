@@ -324,7 +324,6 @@ def build_email_html(
 def send_report_email(
     analysis: PortfolioAnalysis,
     report_date: str,
-    report_url: Optional[str] = None,
     report_path: Optional[Path] = None,
 ) -> None:
     """
@@ -333,7 +332,6 @@ def send_report_email(
     Args:
         analysis:     Completed PortfolioAnalysis — drives the summary content.
         report_date:  Statement date string, used in the subject line.
-        report_url:   Public URL to the hosted full report (optional).
         report_path:  Path to the local .html file — attached if provided (optional).
     """
     from_email   = os.environ["GMAIL_ADDRESS"]
