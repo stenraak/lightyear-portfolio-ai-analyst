@@ -2,8 +2,8 @@ name: Portfolio Analysis
 
 on:
   schedule:
-    # Runs at 08:00 UTC on days 1, 6, 11, 16, 21, 26 of every month (~every 5 days)
-    - cron: '0 8 1,6,11,16,21,26 * *'
+    # Runs every Saturday at 08:00 UTC
+    - cron: '0 8 * * 6'
   workflow_dispatch:  # Manual trigger from GitHub Actions UI
 
 jobs:
