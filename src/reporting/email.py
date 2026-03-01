@@ -3,13 +3,13 @@ Email delivery for portfolio analysis reports.
 
 Uses Gmail SMTP with an App Password — no extra package required (stdlib only).
 The email body is an Outlook-safe summary built from structured analysis data.
-The full HTML report is attached as report.html AND hosted at a public URL.
+The full HTML report is attached as report.html — open the attachment in any browser.
 
 Email rendering across clients:
   Gmail / Apple Mail / Outlook web  — full summary renders correctly
   Outlook for Windows                — summary renders (table-based, inline styles)
-  All clients                        — can open the attached report.html in a browser
-                                       or follow the "View Full Report" link
+  All clients                        — open the attached report.html in a browser
+                                       for the full interactive dark-theme report
 
 Setup (one-time):
   1. Enable 2-Step Verification on your Google account
@@ -231,24 +231,6 @@ def _action_card(analysis: PortfolioAnalysis) -> str:
     return _card("Portfolio Action", body)
 
 
-def _cta_button(url: str) -> str:
-    return f"""
-<table width="100%" cellpadding="0" cellspacing="0">
-  <tr>
-    <td style="padding:8px 0 24px;text-align:center;">
-      <a href="{url}"
-         style="display:inline-block;padding:12px 32px;background:{_C['header']};
-                color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">
-        View Full Report &rarr;
-      </a>
-      <div style="font-size:11px;color:{_C['muted']};margin-top:8px;">
-        Opens in your browser
-      </div>
-    </td>
-  </tr>
-</table>"""
-
-
 # ---------------------------------------------------------------------------
 # Top-level HTML assembler
 # ---------------------------------------------------------------------------
@@ -256,7 +238,6 @@ def _cta_button(url: str) -> str:
 def build_email_html(
     analysis: PortfolioAnalysis,
     report_date: str,
-    report_url: Optional[str] = None,
 ) -> str:
     """
     Assemble the full Outlook-safe summary email.
@@ -273,13 +254,6 @@ def build_email_html(
         + _stats_card(analysis)
         + _opportunity_risk_card(analysis)
         + _action_card(analysis)
-    )
-
-    view_link = (
-        f"&nbsp;&middot;&nbsp;"
-        f"<a href='{report_url}' style='color:{_C['header']};text-decoration:none;'>"
-        f"View in browser</a>"
-        if report_url else ""
     )
 
     return f"""<!DOCTYPE html>
@@ -323,15 +297,14 @@ def build_email_html(
         </td>
       </tr>
 
-      <!-- CTA (only if a URL is available) -->
-      {"<tr><td>" + _cta_button(report_url) + "</td></tr>" if report_url else ""}
-
       <!-- Footer -->
       <tr>
         <td style="background:{_C['card']};border-top:1px solid {_C['border']};
                    padding:14px 28px;">
           <p style="font-size:11px;color:{_C['muted']};margin:0;text-align:center;">
-            Lightyear Portfolio AI Analyst{view_link}
+            Lightyear Portfolio AI Analyst
+            &nbsp;&middot;&nbsp;
+            Full report attached &mdash; open in any browser
           </p>
         </td>
       </tr>
@@ -367,12 +340,11 @@ def send_report_email(
     app_password = os.environ["GMAIL_APP_PASSWORD"]
     to_email     = os.environ["REPORT_EMAIL_TO"]
 
-    email_html = build_email_html(analysis, report_date, report_url)
+    email_html = build_email_html(analysis, report_date)
 
     plain_text = (
         f"Portfolio Analysis for {report_date}\n"
         f"Total value: €{analysis.total_value_eur:,.2f}\n"
-        + (f"Full report: {report_url}\n" if report_url else "")
         + "\nPositions:\n"
         + "\n".join(
             f"  {p.symbol}: {p.recommendation.upper()} ({p.conviction} conviction)"

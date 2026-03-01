@@ -194,11 +194,7 @@ def test_report_contains_all_sections(tmp_path):
 def test_email_html_contains_key_sections():
     """build_email_html returns valid Outlook-safe HTML with all expected sections."""
     analysis = _fake_analysis()
-    html = build_email_html(
-        analysis,
-        report_date="2026-02-21",
-        report_url="https://example.com/report.html",
-    )
+    html = build_email_html(analysis, report_date="2026-02-21")
 
     # Structure
     assert "<!DOCTYPE html>" in html
@@ -214,20 +210,11 @@ def test_email_html_contains_key_sections():
     assert "Top Risk" in html
     assert "Portfolio Action" in html
 
-    # CTA link
-    assert "View Full Report" in html
-    assert "https://example.com/report.html" in html
+    # Footer note
+    assert "Full report attached" in html
 
     # No CSS Grid or Flexbox — Outlook-unsafe properties must be absent
     assert "display:grid" not in html
     assert "display: grid" not in html
     assert "display:flex" not in html
     assert "display: flex" not in html
-
-
-def test_email_html_without_url_omits_cta():
-    """When no report_url is provided the CTA button is omitted."""
-    analysis = _fake_analysis()
-    html = build_email_html(analysis, report_date="2026-02-21", report_url=None)
-    assert "View Full Report" not in html
-    assert "View in browser" not in html
