@@ -5,6 +5,7 @@ from src.analysis.analyst import (
     _parse_json_response,
     PositionAnalysis,
     analyze_position,
+    analyze_watchlist,
     _compute_correlation_matrix,
     _compute_sizing_alignment,
     _compute_portfolio_beta_and_drawdowns,
@@ -265,6 +266,47 @@ def test_compute_sizing_alignment_flags_mismatch():
     assert len(result) == 1
     assert result[0]["flag"] == "undersized_high_conviction_buy"
     assert result[0]["weight_pct"] == pytest.approx(8.0)
+
+
+def test_analyze_watchlist_returns_analyses_for_each_symbol():
+    """analyze_watchlist runs LLM analysis for each symbol and returns matching market_data."""
+    llm_json = """{
+        "symbol": "MSFT",
+        "business_quality": {"score": 9, "moat_assessment": "wide", "summary": "Strong moat."},
+        "financial_health": {"score": 9, "revenue_trend": "growing",
+                             "margin_trend": "stable", "fcf_quality": "strong",
+                             "summary": "Excellent."},
+        "valuation": {"score": 5, "assessment": "fair", "summary": "Reasonable."},
+        "risks": {"score": 4, "key_risks": ["Competition"]},
+        "news_sentiment": {"sentiment": "positive", "summary": "Good."},
+        "growth_opportunities": ["Azure growth"],
+        "bull_case": {"thesis": "Cloud.", "catalysts": ["Azure"]},
+        "bear_case": {"thesis": "Competition.", "risks": ["Google"]},
+        "recommendation": {
+            "action": "buy", "conviction": "high", "time_horizon": "long_term",
+            "rationale": "Quality compounder.",
+            "key_upsides": ["Azure"], "key_downsides": ["Valuation"]
+        }
+    }"""
+
+    fake_md = _make_market_data("MSFT")
+
+    with patch("src.analysis.analyst._call_llm", return_value=llm_json), \
+         patch("src.analysis.analyst.fetch_all_market_data", return_value={"MSFT": fake_md}):
+        analyses, market_data = analyze_watchlist(["MSFT"])
+
+    assert len(analyses) == 1
+    assert analyses[0].symbol == "MSFT"
+    assert analyses[0].recommendation == "buy"
+    assert analyses[0].fetch_error is None
+    assert "MSFT" in market_data
+
+
+def test_analyze_watchlist_empty_returns_empty():
+    """analyze_watchlist with no symbols returns empty list and dict."""
+    analyses, market_data = analyze_watchlist([])
+    assert analyses == []
+    assert market_data == {}
 
 
 def test_compute_portfolio_beta_weighted():

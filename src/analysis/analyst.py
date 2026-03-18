@@ -140,6 +140,8 @@ class PortfolioAnalysis(BaseModel):
     sizing_alignment: list[dict] = Field(default_factory=list)
     portfolio_beta: Optional[float] = None
     drawdown_scenarios: list[dict] = Field(default_factory=list)
+    watchlist: list[PositionAnalysis] = Field(default_factory=list)
+    watchlist_market_data: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -401,3 +403,47 @@ def analyze_portfolio(snapshot: PortfolioSnapshot) -> PortfolioAnalysis:
         portfolio_beta=portfolio_beta,
         drawdown_scenarios=drawdown_scenarios,
     )
+
+
+def analyze_watchlist(
+    symbols: list[str],
+) -> tuple[list[PositionAnalysis], dict[str, Any]]:
+    """
+    Fetch market data and run LLM analysis for watchlist symbols.
+
+    Uses stub Position objects (quantity=0, value_eur=0) so the existing
+    analyze_position path is reused without modification. Results are not
+    stored in the database — they are report-only.
+
+    Returns:
+        (analyses, market_data)
+    """
+    if not symbols:
+        return [], {}
+
+    print(f"\nAnalyzing watchlist ({len(symbols)} symbols)...")
+    market_data = fetch_all_market_data(symbols)
+
+    analyses = []
+    for symbol in symbols:
+        stub = Position(
+            symbol=symbol,
+            name=symbol,
+            isin="",
+            quantity=0.0,
+            value_original="",
+            value_eur=0.0,
+            currency="",
+        )
+        print(f"  Analyzing {symbol} (watchlist)...")
+        analysis = analyze_position(stub, market_data[symbol])
+        analyses.append(analysis)
+
+        if analysis.fetch_error:
+            print(f"    Warning: {analysis.fetch_error}")
+        else:
+            print(f"    {analysis.recommendation.upper()} "
+                  f"({analysis.conviction} conviction) — "
+                  f"{analysis.valuation_assessment}")
+
+    return analyses, market_data

@@ -886,6 +886,30 @@ def _render_portfolio_summary(
 
 
 # ---------------------------------------------------------------------------
+# Watchlist section
+# ---------------------------------------------------------------------------
+
+def _render_watchlist_section(
+    analyses: list[PositionAnalysis],
+    market_data: dict,
+) -> str:
+    """Render watchlist position cards under a separate section heading."""
+    if not analyses:
+        return ""
+    cards = "\n".join(
+        _render_position_card(a, market_data.get(a.symbol))
+        for a in analyses
+    )
+    return f"""
+    <h2 style="margin: 32px 0 16px; color:#64748b;
+               font-size:14px; text-transform:uppercase;
+               letter-spacing:0.05em;">
+        Watchlist ({len(analyses)})
+    </h2>
+    {cards}"""
+
+
+# ---------------------------------------------------------------------------
 # Full report
 # ---------------------------------------------------------------------------
 
@@ -1030,6 +1054,9 @@ def generate_report(
         for p in analysis.positions
     )
     portfolio_summary = _render_portfolio_summary(analysis)
+    watchlist_section = _render_watchlist_section(
+        analysis.watchlist, analysis.watchlist_market_data
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1060,6 +1087,8 @@ def generate_report(
         </h2>
 
         {position_cards}
+
+        {watchlist_section}
     </div>
 </body>
 </html>"""

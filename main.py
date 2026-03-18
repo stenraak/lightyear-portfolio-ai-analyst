@@ -12,6 +12,7 @@ Flow:
 8. Update historical recommendation prices
 """
 
+import json
 import os
 import sys
 from datetime import date, datetime
@@ -20,7 +21,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from src.ingestion.lightyear import parse_lightyear_pdf, PortfolioSnapshot
-from src.analysis.analyst import analyze_portfolio
+from src.analysis.analyst import analyze_portfolio, analyze_watchlist
 from src.reporting.report import generate_report
 from src.reporting.email import send_report_email
 from src.database.supabase_client import (
@@ -37,6 +38,14 @@ load_dotenv()
 
 PDF_BUCKET = "portfolio-pdfs"
 REPORTS_DIR = Path("reports")
+WATCHLIST_PATH = Path("watchlist.json")
+
+
+def load_watchlist() -> list[str]:
+    """Load watchlist symbols from watchlist.json. Returns [] if file absent."""
+    if WATCHLIST_PATH.exists():
+        return json.loads(WATCHLIST_PATH.read_text(encoding="utf-8"))
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +350,16 @@ def run_pipeline(force: bool = False) -> bool:
 
         # --- Store analysis ---
         store_analysis(portfolio_analysis, snapshot_id)
+
+        # --- Watchlist analysis (report-only, not stored in DB) ---
+        watchlist_symbols = load_watchlist()
+        if watchlist_symbols:
+            print(f"\nWatchlist: {', '.join(watchlist_symbols)}")
+            wl_analyses, wl_market_data = analyze_watchlist(watchlist_symbols)
+            portfolio_analysis = portfolio_analysis.model_copy(update={
+                "watchlist": wl_analyses,
+                "watchlist_market_data": wl_market_data,
+            })
 
         # --- Generate report ---
         REPORTS_DIR.mkdir(exist_ok=True)

@@ -245,9 +245,14 @@ def build_email_html(
     Pure function — takes structured data, returns an HTML string.
     Modify or reorder the section builders above to change the layout.
     """
-    buy_count  = sum(1 for p in analysis.positions if p.recommendation == "buy")
-    hold_count = sum(1 for p in analysis.positions if p.recommendation == "hold")
-    sell_count = sum(1 for p in analysis.positions if p.recommendation == "sell")
+    buy_count      = sum(1 for p in analysis.positions if p.recommendation == "buy")
+    hold_count     = sum(1 for p in analysis.positions if p.recommendation == "hold")
+    sell_count     = sum(1 for p in analysis.positions if p.recommendation == "sell")
+    watchlist_count = len(analysis.watchlist)
+    watchlist_str  = (
+        f"&nbsp;&middot;&nbsp; {watchlist_count} Watchlist"
+        if watchlist_count else ""
+    )
 
     sections = (
         _positions_card(analysis)
@@ -285,7 +290,7 @@ def build_email_html(
             &nbsp;&middot;&nbsp;
             {buy_count} Buy &nbsp;&middot;&nbsp;
             {hold_count} Hold &nbsp;&middot;&nbsp;
-            {sell_count} Sell
+            {sell_count} Sell{watchlist_str}
           </div>
         </td>
       </tr>

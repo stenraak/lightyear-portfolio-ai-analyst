@@ -4,6 +4,20 @@ from src.reporting.email import build_email_html
 from src.analysis.analyst import PortfolioAnalysis, PositionAnalysis
 from src.ingestion.market import MarketData, ValuationMetrics, NewsItem
 
+_MSFT_RAW = {
+    "business_quality": {"score": 9, "summary": "Wide moat cloud leader."},
+    "financial_health": {"score": 9, "summary": "Exceptional cash generation."},
+    "valuation": {"assessment": "fair", "summary": "Reasonable for quality."},
+    "risks": {"score": 4, "key_risks": ["Competition from Google", "AI regulation"]},
+    "news_sentiment": {"sentiment": "positive", "summary": "Strong Azure results."},
+    "bull_case": {"thesis": "Azure + AI monetisation.", "catalysts": ["Copilot adoption"]},
+    "bear_case": {"thesis": "Antitrust risk.", "risks": ["EU scrutiny"]},
+    "recommendation": {
+        "action": "buy", "conviction": "high", "rationale": "Quality compounder.",
+        "key_upsides": ["Azure 30% growth"], "key_downsides": ["Stretched valuation"],
+    },
+}
+
 
 def _fake_analysis() -> PortfolioAnalysis:
     pos = PositionAnalysis(
@@ -153,6 +167,30 @@ def _fake_analysis() -> PortfolioAnalysis:
             "NVDA": {"NVDA": 1.0, "AMD": 0.82},
             "AMD": {"NVDA": 0.82, "AMD": 1.0},
         },
+        watchlist=[
+            PositionAnalysis(
+                symbol="MSFT",
+                raw=_MSFT_RAW,
+                recommendation="buy",
+                conviction="high",
+                valuation_assessment="fair",
+                business_quality_score=9,
+                financial_health_score=9,
+                risk_score=4,
+                asset_type="EQUITY",
+            )
+        ],
+        watchlist_market_data={
+            "MSFT": MarketData(
+                symbol="MSFT",
+                yf_symbol="MSFT",
+                short_name="Microsoft",
+                long_name="Microsoft Corporation",
+                currency="USD",
+                asset_type="EQUITY",
+                metrics=ValuationMetrics(current_price=420.0, beta=0.9),
+            )
+        },
     )
 
 
@@ -189,6 +227,8 @@ def test_report_contains_all_sections(tmp_path):
     assert "Position Sizing" in content
     assert "Portfolio Beta" in content
     assert "Return Correlation" in content
+    assert "Watchlist" in content
+    assert "MSFT" in content
 
 
 def test_email_html_contains_key_sections():
