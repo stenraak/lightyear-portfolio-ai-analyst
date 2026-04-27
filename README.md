@@ -118,7 +118,7 @@ LLM_PROVIDER=groq              # or: anthropic
 # Email delivery (optional — skip to disable)
 GMAIL_ADDRESS=your.address@gmail.com
 GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
-REPORT_EMAIL_TO=recipient@example.com
+REPORT_EMAIL_TO=recipient@example.com 
 ```
 
 Get a free Finnhub API key at [finnhub.io](https://finnhub.io) (60 req/min, no daily cap).
@@ -219,6 +219,20 @@ uv run python main.py --force
 ```
 
 The report is saved to `reports/report_<date>_<time>.html`, uploaded to Supabase Storage, and emailed if `GMAIL_*` env vars are set.
+
+### Local mode (no Supabase required)
+
+Pass a PDF directly to get an HTML report without any database dependency. Only LLM + Finnhub API keys are needed.
+
+```bash
+# Output goes to reports/report_<date>_<time>.html
+uv run python main.py --local path/to/statement.pdf
+
+# Custom output path
+uv run python main.py --local path/to/statement.pdf --output out.html
+```
+
+Skips: Supabase storage/DB, sold position tracking, recommendation tracking, email delivery.
 
 ---
 

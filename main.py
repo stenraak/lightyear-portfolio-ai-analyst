@@ -12,6 +12,7 @@ Flow:
 8. Update historical recommendation prices
 """
 
+import argparse
 import json
 import os
 import sys
@@ -417,10 +418,72 @@ def run_pipeline(force: bool = False) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Local (no-Supabase) mode
+# ---------------------------------------------------------------------------
+
+def run_local(pdf_path: Path, output_path: Path | None = None) -> bool:
+    """
+    Run parse → analyse → report without any Supabase calls.
+    Requires LLM_PROVIDER + matching API key in env.
+    """
+    print(f"\n{'='*50}")
+    print(f"Portfolio Analyst (local) — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"{'='*50}\n")
+
+    if not pdf_path.exists():
+        print(f"Error: PDF not found: {pdf_path}")
+        return False
+
+    print(f"PDF: {pdf_path}\n")
+
+    print("Parsing portfolio statement...")
+    snapshot = parse_lightyear_pdf(pdf_path)
+    print(f"Found {len(snapshot.positions)} positions — "
+          f"total €{snapshot.total_investments_eur:,.2f}\n")
+
+    portfolio_analysis = analyze_portfolio(snapshot)
+
+    watchlist_symbols = load_watchlist()
+    if watchlist_symbols:
+        print(f"\nWatchlist: {', '.join(watchlist_symbols)}")
+        wl_analyses, wl_market_data = analyze_watchlist(watchlist_symbols)
+        portfolio_analysis = portfolio_analysis.model_copy(update={
+            "watchlist": wl_analyses,
+            "watchlist_market_data": wl_market_data,
+        })
+
+    REPORTS_DIR.mkdir(exist_ok=True)
+    if output_path is None:
+        report_filename = (
+            f"report_{snapshot.statement_date}_"
+            f"{datetime.now().strftime('%H%M')}.html"
+        )
+        output_path = REPORTS_DIR / report_filename
+
+    report_path = generate_report(portfolio_analysis, output_path=output_path)
+
+    print(f"\n{'='*50}")
+    print(f"Done. Report: {report_path}")
+    print(f"{'='*50}\n")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    force = "--force" in sys.argv
-    success = run_pipeline(force=force)
+    parser = argparse.ArgumentParser(description="Lightyear Portfolio Analyst")
+    parser.add_argument("--force", action="store_true",
+                        help="Skip 5-day interval check")
+    parser.add_argument("--local", metavar="PDF_PATH",
+                        help="Run locally (no Supabase) with the given PDF")
+    parser.add_argument("--output", metavar="OUTPUT_PATH",
+                        help="Output HTML path (only used with --local)")
+    args = parser.parse_args()
+
+    if args.local:
+        success = run_local(Path(args.local), Path(args.output) if args.output else None)
+    else:
+        success = run_pipeline(force=args.force)
     sys.exit(0 if success else 1)

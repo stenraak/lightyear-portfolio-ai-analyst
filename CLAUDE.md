@@ -30,10 +30,12 @@ main.py          — Entry point with 5-day trigger logic
 - Tests: unit tests in test_*.py, integration tests in test_*_integration.py
 - Run all tests: `uv run pytest tests/ -v`
 - Run with force: `uv run python main.py --force`
+- Run locally (no Supabase): `uv run python main.py --local path/to/statement.pdf`
 - Always run with force end to end after doing changes
 
 ## Environment Variables Required
-SUPABASE_URL, SUPABASE_KEY, GROQ_API_KEY, ANTHROPIC_API_KEY, LLM_PROVIDER, FINNHUB_API_KEY
+Full pipeline: SUPABASE_URL, SUPABASE_KEY, GROQ_API_KEY, ANTHROPIC_API_KEY, LLM_PROVIDER, FINNHUB_API_KEY
+Local mode (--local): only LLM_PROVIDER + GROQ_API_KEY or ANTHROPIC_API_KEY + FINNHUB_API_KEY
 
 ## What To Avoid
 - Never hardcode API keys
